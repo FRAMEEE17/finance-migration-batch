@@ -1,0 +1,26 @@
+# large data — keep out of git
+dataset/*.csv
+dataset/*.parquet
+*.db
+practice.db
+
+# book OCR dumps (local reference only)
+marker_out/
+AWS-Retail-Data-ETL-Pipeline/
+ArsenalFC-Data-Pipeline-Project/
+us-sme-dataset-sample/
+9arm-skills/
+review-skill/
+skills/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+
+.claude/agents/
+docs/prompts.md
+.claude/orchestration.md
+docs/agents/
+CLAUDE.md
+AGENTS.md
