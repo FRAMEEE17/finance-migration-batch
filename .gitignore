@@ -4,7 +4,6 @@ dataset/*.parquet
 *.db
 practice.db
 
-# book OCR dumps (local reference only)
 marker_out/
 AWS-Retail-Data-ETL-Pipeline/
 ArsenalFC-Data-Pipeline-Project/

@@ -1,72 +1,77 @@
-# Architecture: drawing brief
+# Architecture
 
-Spec for the diagram (`docs/architecture.png`, draw.io): layered left to
-right, one box per component, pattern names as labels. The pattern names
-follow the vocabulary in Bartosz Konieczny's *Data Engineering Design
-Patterns* (O'Reilly, 2025).
+Layered left to right: where data enters, what shape it takes at each stage,
+and where a number gets checked. Pattern names follow Bartosz Konieczny's
+*Data Engineering Design Patterns* (O'Reilly, 2025).
 
-## Boxes and arrows (left → right)
+```mermaid
+flowchart LR
+    src[("journal_entries<br/>parquet / csv<br/>~649k rows, 49 cols")]
 
+    subgraph ingest [ingestion]
+        stg[("stg_gl<br/>raw, as-is<br/>never edited")]
+    end
+
+    subgraph gate [quality gate]
+        audit{{"blocking audits<br/>unbalanced_document<br/>duplicate_source<br/>map_fanout"}}
+        dq[("dq_violations")]
+    end
+
+    subgraph model [star schema]
+        mapf[/"map_account.csv<br/>approved by hand"/]
+        dim[("dim_account<br/>505 → 27 classes")]
+        fact[("fact_gl_line<br/>replace whole period")]
+    end
+
+    subgraph recon [reconciliation]
+        rps[("recon_period_summary<br/>per account, per period")]
+        rmm[("recon_mismatch<br/>bucket + cause")]
+    end
+
+    report[["reports/period_YYYY-PP.md<br/>signed by finance"]]
+
+    src --> stg
+    stg --> audit
+    audit -- fail --> dq
+    audit -- pass --> fact
+    mapf --> dim
+    dim --> fact
+    stg -. raw side .-> recon
+    fact -. modeled side .-> recon
+    rps --> report
+    rmm --> report
 ```
-┌─ SOURCE ─────────┐   ┌─ INGESTION ──────┐   ┌─ STORAGE (DuckDB) ─────────────┐
-│ journal_entries  │──▶│ Full Loader      │──▶│ stg_gl  (raw, verbatim)        │
-│ .parquet / .csv  │   │ (verbatim, no    │   │ 648,801 rows · never edited    │
-│ 649k rows, 49 col│   │  transform)      │   └──────────┬─────────────────────┘
-└──────────────────┘   └──────────────────┘              │
-                                                         ▼
-                              ┌─ QUALITY GATE / Audit-Write-Audit-Publish ────┐
-                              │ blocking audits: unbalanced_document,         │
-                              │ duplicate_source, map_fanout                  │
-                              │ findings: local_amount_imbalance, unmapped_*  │
-                              │     ├──▶ dq_violations   (Dead-Letter)        │
-                              │     └──▶ recon_mismatch  (bucket + cause)     │
-                              └──────────────────┬────────────────────────────┘
-                                                 ▼
-┌─ MAPPING ────────────┐   ┌─ PROCESSING (star schema) ──────────────────────┐
-│ map_account.csv      │──▶│ fact_gl_line   (Data Overwrite per period,      │
-│ human-approved       │   │                 Transactional Writer)           │
-│ (Static Joiner)      │   │ dim_account    (505 accounts → 27 classes)      │
-└──────────────────────┘   │ Horizontal Partitioner: (fiscal_year, period)   │
-                           └──────────────────┬──────────────────────────────┘
-                                              ▼
-                           ┌─ RECONCILE (SQL) ───────────┐   ┌─ SERVING ─────────────┐
-                           │ stg_gl vs fact_gl_line      │──▶│ reports/period_*.md   │
-                           │ per period · per account    │   │ signed by finance     │
-                           │ per document (FULL OUTER)   │   │ = "closed period"     │
-                           └─────────────────────────────┘   └───────────────────────┘
 
-bottom bars:
-  Orchestration: Python scripts (sequential = Single Runner) ▸ future: Airflow
-  Engine/Storage: DuckDB + Parquet                            ▸ future: Databricks / Azure SQL
-  Late data:     FY2025 P02 held in stg (Late Data Detector)  ▸ future: Static Late Data Integrator
-```
+Solid arrows are the data path. The dashed arrows into reconciliation are the
+comparison: `stg_gl` (raw) against `fact_gl_line` (modeled), per period and
+per account. Every difference is classified into `recon_mismatch` with one
+bucket and one cause.
 
-## Pattern legend (what to label where)
+A rendered version of this diagram is at `docs/architecture.png`.
 
-| Component | Pattern (book name) | Why here |
+**Base layer (not drawn):** engine is DuckDB + Parquet; orchestration is
+sequential Python scripts; the FY2025 P02 rows sit in `stg_gl` unreconciled
+until their period is in scope.
+
+## Pattern legend
+
+| Component | Pattern | Why here |
 |---|---|---|
-| CSV/parquet → `stg_gl` | **Full Loader** | bounded batch migration; no CDC/incremental needed |
-| period replace, rerun-stable | **Data Overwrite** + **Transactional Writer** | idempotency: delete+insert whole partition in one txn |
-| staging → publish gate | **Audit-Write-Audit-Publish** | audit before anything reaches `fact_gl_line` |
-| rejected rows | **Dead-Letter** | unprocessable rows land in `dq_violations`, never vanish |
+| `csv/parquet → stg_gl` | Full Loader | bounded batch migration, no CDC or incremental needed |
+| period replace, rerun-stable | Data Overwrite + Transactional Writer | delete and re-insert the whole period in one transaction |
+| staging to publish | Audit-Write-Audit-Publish | audits run before anything reaches `fact_gl_line` |
+| rejected rows | Dead-Letter | unprocessable rows go to `dq_violations`, never dropped |
 | duplicate grain | detector only, not Windowed Deduplicator | no version column exists, so block rather than auto-pick |
-| `map_account` join | **Static Joiner** | enrichment from a small human-owned dataset |
-| period partitions | **Horizontal Partitioner** | replace/backfill unit = one period |
-| FY2025 P02 | **Late Data Detector** (now) → **Static Late Data Integrator** (later) | out-of-scope rows stay visible, no merge |
-| P02/P03 backfill | **Parallel Split** | independent periods can load in parallel |
-| run logs / run1-vs-run2 diff | **Dataset Tracker** (light) | row counts + totals per run |
+| `map_account` join | Static Joiner | enrichment from a small hand-owned file |
+| period partitions | Horizontal Partitioner | the replace and backfill unit is one period |
+| FY2025 P02 | Late Data Detector | out-of-scope rows stay visible, no merge |
+| P02 and P03 backfill | Parallel Split | independent periods can load in parallel |
+| run logs, run-to-run diff | Dataset Tracker | row counts and totals recorded per run |
 
-## Scalability story (annotate as dashed "future" boxes)
+## Scaling path
 
-Same layers, swappable engines. The SQL and the contracts do not change:
-- DuckDB → Databricks / Azure Synapse (engine swap, star schema identical)
-- Python scripts → Airflow DAG (same jobs, adds retry/backfill/SLA)
-- local parquet → ADLS/S3 landing zone (same Full Loader semantics)
+Same layers, swappable engines. The SQL and the contracts do not change.
 
-## Drawing checklist (done when…)
-
-- [ ] every box above appears once, grouped into the 7 layers
-- [ ] arrows follow the data, left→right, no cycles
-- [ ] pattern names appear as small labels on their component
-- [ ] the two bottom bars (orchestration / engine) with "future" swaps
-- [ ] exported to `docs/architecture.png` and committed
+- DuckDB to Databricks or Azure Synapse: engine swap, star schema identical
+- Python scripts to an Airflow DAG: same jobs, adds retry, backfill, SLA
+- local parquet to an ADLS or S3 landing zone: same Full Loader semantics
