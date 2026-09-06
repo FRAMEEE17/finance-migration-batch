@@ -23,3 +23,5 @@ docs/prompts.md
 docs/agents/
 CLAUDE.md
 AGENTS.md
+*.duckdb
+src/__pycache__/
