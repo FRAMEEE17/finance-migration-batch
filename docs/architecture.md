@@ -55,18 +55,22 @@ until their period is in scope.
 
 ## Pattern legend
 
+Full definitions, with the book's problem statement and where we differ, are
+in `docs/design-patterns.md`.
+
 | Component | Pattern | Why here |
 |---|---|---|
-| `csv/parquet → stg_gl` | Full Loader | bounded batch migration, no CDC or incremental needed |
+| `csv/parquet → stg_gl` | Full Loader | no CDC column, so a full EL copy |
 | period replace, rerun-stable | Data Overwrite + Transactional Writer | delete and re-insert the whole period in one transaction |
-| staging to publish | Audit-Write-Audit-Publish | audits run before anything reaches `fact_gl_line` |
-| rejected rows | Dead-Letter | unprocessable rows go to `dq_violations`, never dropped |
+| blocking audits before publish | Audit-Write-Audit-Publish | audits run before anything reaches `fact_gl_line` |
+| non-blocking findings | Offline Observer | `local_amount_imbalance`, `unmapped_account` reported, not blocked |
+| rejected rows | Dead-Letter | failed rows go to `dq_violations`, never dropped |
 | duplicate grain | detector only, not Windowed Deduplicator | no version column exists, so block rather than auto-pick |
 | `map_account` join | Static Joiner | enrichment from a small hand-owned file |
 | period partitions | Horizontal Partitioner | the replace and backfill unit is one period |
 | FY2025 P02 | Late Data Detector | out-of-scope rows stay visible, no merge |
-| P02 and P03 backfill | Parallel Split | independent periods can load in parallel |
-| run logs, run-to-run diff | Dataset Tracker | row counts and totals recorded per run |
+| signed period report | Readiness Marker | downstream trusts a period only after sign-off |
+| `recon_mismatch` bucket + cause | Fine-Grained Tracker | row-level trace from a changed row to the rule that changed it |
 
 ## Scaling path
 
