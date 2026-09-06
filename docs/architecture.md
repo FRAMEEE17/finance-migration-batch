@@ -72,6 +72,23 @@ in `docs/design-patterns.md`.
 | signed period report | Readiness Marker | downstream trusts a period only after sign-off |
 | `recon_mismatch` bucket + cause | Fine-Grained Tracker | row-level trace from a changed row to the rule that changed it |
 
+## Warehouse tables
+
+One DuckDB file, `warehouse.duckdb` (gitignored, rebuilt by the loaders).
+Flat table names in the default `main` schema; the prefix is the layer.
+
+| Table | Layer | Built by |
+|---|---|---|
+| `stg_gl` | staging, raw | `src/load_stg.py` |
+| `dim_account` | core | mapping build |
+| `fact_gl_line` | core | period loader |
+| `dq_violations` | quality, dead-letter | quality gate |
+| `recon_period_summary` | reconciliation | account-level recon |
+| `recon_mismatch` | reconciliation | document-level recon |
+
+`map_account.csv` is a hand-approved file in the repo, not a warehouse
+table.
+
 ## Scaling path
 
 Same layers, swappable engines. The SQL and the contracts do not change.
