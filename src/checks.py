@@ -6,13 +6,16 @@ Add one check per acceptance criterion as tickets land. Keep each check
 deterministic: it computes a value and compares it, no judgement.
 """
 
+import csv
 import sys
 
 import duckdb  # type: ignore
 
-from config import SOURCE_PARQUET, WAREHOUSE_DB
+from config import REPO_ROOT, SOURCE_PARQUET, WAREHOUSE_DB
 
 SOURCE = str(SOURCE_PARQUET)
+MAP_CSV = REPO_ROOT / "map_account.csv"
+SCOPE = "company_code = 1000 AND fiscal_year = 2024 AND fiscal_period IN (1,2,3)"
 
 
 def _tables(con: duckdb.DuckDBPyConnection) -> set[str]:
@@ -46,10 +49,74 @@ def stg_gl_document_count_stable(con):
     return got == 174_944, f"distinct document_id = {got:,} (anchor 174,944)"
 
 
-# --- Ticket 3: mapping ----------------------------------------------------
-# added when #3 lands: source_account unique, every scope gl_account mapped
-# once, status in {mapped,unmapped,deprecated}, dim_account rows == distinct
-# gl_account, gl_account -> account_class is 1:1
+# --- Ticket 3: mapping -----------------------------------------------------
+
+def _map_rows():
+    with open(MAP_CSV, newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def map_account_exists(con):
+    return MAP_CSV.exists(), f"{MAP_CSV}"
+
+
+def map_account_source_unique(con):
+    rows = _map_rows()
+    accounts = [r["source_account"] for r in rows]
+    return len(accounts) == len(set(accounts)), f"{len(rows)} rows, {len(set(accounts))} distinct"
+
+
+def map_account_covers_scope(con):
+    scope_accounts = {
+        str(r[0]) for r in con.execute(f"SELECT DISTINCT gl_account FROM stg_gl WHERE {SCOPE}").fetchall()
+    }
+    csv_accounts = {r["source_account"] for r in _map_rows()}
+    return scope_accounts == csv_accounts, f"scope={len(scope_accounts)}  csv={len(csv_accounts)}"
+
+
+def map_account_status_valid(con):
+    rows = _map_rows()
+    bad = [r for r in rows if r["status"] not in ("mapped", "unmapped", "deprecated")]
+    return not bad, f"{len(bad)} rows with an invalid status" if bad else "all valid"
+
+
+def map_account_target_consistent_with_status(con):
+    rows = _map_rows()
+    bad = [
+        r for r in rows
+        if (r["status"] == "unmapped") == bool(r["target_account"])
+    ]
+    return not bad, f"{len(bad)} rows where target presence disagrees with status" if bad else "consistent"
+
+
+def dim_account_row_count(con):
+    got = con.execute("SELECT COUNT(*) FROM dim_account").fetchone()[0]
+    want = con.execute(f"SELECT COUNT(DISTINCT gl_account) FROM stg_gl WHERE {SCOPE}").fetchone()[0]
+    return got == want, f"dim_account={got}  distinct gl_account={want}"
+
+
+def gl_account_to_class_is_1to1(con):
+    bad = con.execute(f"""
+        SELECT COUNT(*) FROM (
+            SELECT gl_account FROM stg_gl WHERE {SCOPE}
+            GROUP BY 1 HAVING COUNT(DISTINCT COALESCE(account_class, '<null>')) > 1
+        )
+    """).fetchone()[0]
+    return bad == 0, f"{bad} accounts map to more than one class"
+
+
+def fraud_anomaly_accounts_not_excluded(con):
+    """The account set backing map_account.csv must not have been filtered
+    by is_fraud / is_anomaly (ADR-0003)."""
+    with_flags = {
+        str(r[0]) for r in con.execute(
+            f"SELECT DISTINCT gl_account FROM stg_gl WHERE {SCOPE} AND (is_fraud OR is_anomaly)"
+        ).fetchall()
+    }
+    csv_accounts = {r["source_account"] for r in _map_rows()}
+    missing = with_flags - csv_accounts
+    return not missing, f"{len(missing)} flagged-row accounts missing from map_account.csv" if missing else f"{len(with_flags)} flagged-row accounts present"
+
 
 # --- Ticket 4: idempotent loader ----------------------------------------
 # --- Ticket 5+: quality gate, reconciliation ---------------------------
@@ -60,6 +127,14 @@ CHECKS = [
     ("stg_gl row count == source", stg_gl_row_count_matches_source),
     ("stg_gl schema == source", stg_gl_schema_matches_source),
     ("stg_gl document count stable", stg_gl_document_count_stable),
+    ("map_account.csv exists", map_account_exists),
+    ("map_account.csv source_account unique", map_account_source_unique),
+    ("map_account.csv covers scope gl_accounts", map_account_covers_scope),
+    ("map_account.csv status is valid", map_account_status_valid),
+    ("map_account.csv target/status consistent", map_account_target_consistent_with_status),
+    ("dim_account row count == distinct gl_account", dim_account_row_count),
+    ("gl_account -> account_class is 1:1", gl_account_to_class_is_1to1),
+    ("fraud/anomaly accounts not excluded", fraud_anomaly_accounts_not_excluded),
 ]
 
 
