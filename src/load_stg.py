@@ -9,7 +9,7 @@ Run: python src/load_stg.py
 
 import sys
 
-import duckdb
+import duckdb # type: ignore
 
 from config import SOURCE_PARQUET, WAREHOUSE_DB
 
