@@ -17,6 +17,20 @@ SCOPE = "company_code = 1000 AND fiscal_year = 2024 AND fiscal_period IN (1,2,3)
 MAP_CSV = REPO_ROOT / "map_account.csv"
 REPORT_MD = REPO_ROOT / "docs" / "mapping-review.md"
 
+# Docs/missions/01: "suspense / clearing" is a business term, not a literal
+# code value. This pattern is our own derivation of it, not something pinned
+# in a doc, so it lives here as a named constant, not a magic string.
+SUSPENSE_CLEARING_PATTERN = "%suspense%clearing%"
+
+
+def _markdown_table(header: list[str], rows: list[list[str]]) -> list[str]:
+    """Render a markdown table, or 'none' if there are no rows."""
+    if not rows:
+        return ["none"]
+    out = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
+    out.extend("| " + " | ".join(cells) + " |" for cells in rows)
+    return out
+
 
 def verify_key(con) -> None:
     """gl_account -> account_class must be 1:1. If not, target = account_class
@@ -29,6 +43,22 @@ def verify_key(con) -> None:
         print(f"BLOCKED: {len(bad)} gl_account map to >1 account_class: {bad[:5]}")
         sys.exit(1)
     print("verified: gl_account -> account_class is 1:1 in scope")
+
+
+def verify_self_consistent(con) -> None:
+    """Every gl_account must agree with its own lines on
+    financial_statement_category. dim_account assumes one category per
+    account; if this ever fails, that assumption is wrong and nothing
+    downstream (dim_account, the report) can be trusted."""
+    bad = con.execute(f"""
+        SELECT COUNT(*) FROM (
+            SELECT gl_account FROM stg_gl WHERE {SCOPE}
+            GROUP BY 1 HAVING COUNT(DISTINCT financial_statement_category) > 1
+        )
+    """).fetchone()[0]
+    if bad:
+        print(f"BLOCKED: {bad} gl_account disagree with their own lines")
+        sys.exit(1)
 
 
 def build_dim_account(con) -> None:
@@ -73,13 +103,13 @@ def build_dim_account(con) -> None:
 
 
 def draft_map_account(con) -> None:
-    rows = con.execute("""
+    rows = con.execute(f"""
         SELECT
             gl_account AS source_account,
             account_class AS target_account,
             CASE
                 WHEN account_class IS NULL THEN 'unmapped'
-                WHEN account_class_name ILIKE '%suspense%clearing%' THEN 'deprecated'
+                WHEN account_class_name ILIKE '{SUSPENSE_CLEARING_PATTERN}' THEN 'deprecated'
                 ELSE 'mapped'
             END AS status
         FROM dim_account
@@ -103,8 +133,8 @@ def draft_map_account(con) -> None:
     print("verified: source_account unique (map_fanout passes)")
 
 
-def write_report(con) -> None:
-    groups = con.execute(f"""
+def _query_target_groups(con):
+    return con.execute(f"""
         SELECT account_class, account_class_name,
                COUNT(DISTINCT s.gl_account) AS gl_accounts,
                COUNT(*) AS lines,
@@ -113,91 +143,96 @@ def write_report(con) -> None:
         GROUP BY 1, 2 ORDER BY 2
     """).fetchall()
 
-    unmapped = con.execute(f"""
+
+def _query_unmapped(con):
+    return con.execute(f"""
         SELECT s.gl_account, MIN(s.account_description),
                COUNT(*) lines, ROUND(SUM(s.local_amount), 0) net
         FROM stg_gl s WHERE {SCOPE} AND s.account_class IS NULL
         GROUP BY 1 ORDER BY 1
     """).fetchall()
 
-    deprecated = con.execute(f"""
+
+def _query_deprecated(con):
+    return con.execute(f"""
         SELECT s.gl_account, MIN(s.account_description),
                COUNT(*) lines, ROUND(SUM(s.local_amount), 0) net
-        FROM stg_gl s WHERE {SCOPE} AND s.account_class_name ILIKE '%suspense%clearing%'
+        FROM stg_gl s WHERE {SCOPE} AND s.account_class_name ILIKE '{SUSPENSE_CLEARING_PATTERN}'
         GROUP BY 1 ORDER BY 1
     """).fetchall()
 
-    # Grain check: is any single gl_account inconsistent across its own lines?
-    # (it should not be, dim_account assumes each account has one category)
-    self_inconsistent = con.execute(f"""
-        SELECT COUNT(*) FROM (
-            SELECT gl_account FROM stg_gl WHERE {SCOPE}
-            GROUP BY 1 HAVING COUNT(DISTINCT financial_statement_category) > 1
-        )
-    """).fetchone()[0]
-    if self_inconsistent:
-        print(f"BLOCKED: {self_inconsistent} gl_account disagree with their own lines")
-        sys.exit(1)
 
-    # Real dirty signal: an account_class whose member accounts do not agree
-    # with each other on financial_statement_category.
+def _query_split_category(con):
+    """account_class values whose member accounts do not agree with each
+    other on financial_statement_category (each account is internally
+    consistent; verify_self_consistent already guarantees that)."""
     dirty_classes = con.execute(f"""
         SELECT account_class FROM stg_gl WHERE {SCOPE}
         GROUP BY 1 HAVING COUNT(DISTINCT financial_statement_category) > 1
     """).fetchall()
-    dirty = con.execute(f"""
+    if not dirty_classes:
+        return []
+    class_list = ",".join(f"'{c[0]}'" for c in dirty_classes)
+    return con.execute(f"""
         SELECT s.account_class, any_value(s.account_class_name),
                s.financial_statement_category,
                COUNT(DISTINCT s.gl_account) AS accounts,
                COUNT(*) AS lines,
                ROUND(SUM(s.local_amount), 0) AS net_local
         FROM stg_gl s
-        WHERE {SCOPE} AND s.account_class IN ({",".join(f"'{c[0]}'" for c in dirty_classes)})
+        WHERE {SCOPE} AND s.account_class IN ({class_list})
         GROUP BY 1, 3 ORDER BY 1, 3
-    """).fetchall() if dirty_classes else []
+    """).fetchall()
 
-    lines = []
-    lines.append("# Mapping review: draft for #3\n")
-    lines.append("Draft, not approved. See `docs/missions/01-chart-of-accounts-mapping.md`.\n")
 
-    lines.append("## 1. Target groups (27 account_class values)\n")
-    lines.append("| class | name | gl accounts | lines | net local |")
-    lines.append("|---|---|---|---|---|")
-    for cls, name, gl, ln, net in groups:
-        lines.append(f"| `{cls}` | {name} | {gl} | {ln:,} | {net:,.0f} |")
+def _build_report_text(groups, unmapped, deprecated, dirty) -> str:
+    lines = [
+        "# Mapping review: draft for #3\n",
+        "Draft, not approved. See `docs/missions/01-chart-of-accounts-mapping.md`.\n",
+        f"## 1. Target groups ({len(groups)} account_class values)\n",
+    ]
+    lines += _markdown_table(
+        ["class", "name", "gl accounts", "lines", "net local"],
+        [[f"`{cls}`", str(name), str(gl), f"{ln:,}", f"{net:,.0f}"] for cls, name, gl, ln, net in groups],
+    )
 
     lines.append("\n## 2. Unmapped (no account_class, needs your ruling)\n")
-    if unmapped:
-        lines.append("| gl_account | description | lines | net local |")
-        lines.append("|---|---|---|---|")
-        for acc, desc, ln, net in unmapped:
-            lines.append(f"| `{acc}` | {desc} | {ln} | {net:,.0f} |")
-    else:
-        lines.append("none")
+    lines += _markdown_table(
+        ["gl_account", "description", "lines", "net local"],
+        [[f"`{acc}`", str(desc), str(ln), f"{net:,.0f}"] for acc, desc, ln, net in unmapped],
+    )
 
     lines.append("\n## 3. Deprecated proposal (suspense / clearing, needs your ruling)\n")
-    if deprecated:
-        lines.append("| gl_account | description | lines | net local |")
-        lines.append("|---|---|---|---|")
-        for acc, desc, ln, net in deprecated:
-            lines.append(f"| `{acc}` | {desc} | {ln} | {net:,.0f} |")
-    else:
-        lines.append("none")
+    lines += _markdown_table(
+        ["gl_account", "description", "lines", "net local"],
+        [[f"`{acc}`", str(desc), str(ln), f"{net:,.0f}"] for acc, desc, ln, net in deprecated],
+    )
 
     lines.append(
         "\n## 4. Classes that split across financial_statement_category "
         "(each account is internally consistent; accounts within the same "
         "class disagree with each other, needs your ruling)\n"
     )
-    if dirty:
-        lines.append("| class | name | category | accounts | lines | net local |")
-        lines.append("|---|---|---|---|---|---|")
-        for cls, name, cat, accts, ln, net in dirty:
-            lines.append(f"| `{cls}` | {name} | {cat or '<null>'} | {accts} | {ln:,} | {net:,.0f} |")
-    else:
-        lines.append("none")
+    lines += _markdown_table(
+        ["class", "name", "category", "accounts", "lines", "net local"],
+        [
+            [f"`{cls}`", str(name), cat or "<null>", str(accts), f"{ln:,}", f"{net:,.0f}"]
+            for cls, name, cat, accts, ln, net in dirty
+        ],
+    )
 
-    REPORT_MD.write_text("\n".join(lines) + "\n")
+    return "\n".join(lines) + "\n"
+
+
+def write_report(con) -> None:
+    verify_self_consistent(con)
+    report = _build_report_text(
+        groups=_query_target_groups(con),
+        unmapped=_query_unmapped(con),
+        deprecated=_query_deprecated(con),
+        dirty=_query_split_category(con),
+    )
+    REPORT_MD.write_text(report)
     print(f"wrote {REPORT_MD}")
 
 
