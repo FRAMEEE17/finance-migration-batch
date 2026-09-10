@@ -1,9 +1,9 @@
 # Mission 06: Account-level reconciliation (2024-01)
 
 - **Signal:** issue #6. No `Blocked by:` line in the issue itself, but it
-  reads `fact_gl_line` and `dq_violations`, both owned by #5, which is
-  still open (built, not yet approved). Flagged in Human approvals below,
-  not silently assumed fine.
+  reads `fact_gl_line` and `dq_violations`, both owned by #5. #5 is now
+  approved and closed, so the numbers this mission reads are final, not
+  provisional.
 - **Confidence:** high on the mechanical part (`recon_period_summary`
   build). The investigative part (why P01's net isn't near zero) turned
   out to have a real, material answer, not a quick query.
@@ -128,10 +128,8 @@ mismatch. It's that the close total itself rests on ~$97M of
 
 **Before build:**
 
-- issue #5 is still open. Building on `fact_gl_line`/`dq_violations`
-  before #5 is approved means this mission's numbers could shift if #5's
-  review changes anything. Proceeding anyway is your call to make, not
-  assumed
+- issue #5 approved and closed. `fact_gl_line`/`dq_violations` are final
+  for this scope, not provisional
 - `recon_period_summary` schema and grain as described above
 - the H1/H2 exploration stands as the "hypotheses tested" deliverable
   issue #6 asks for; no further hypothesis needed before building the
