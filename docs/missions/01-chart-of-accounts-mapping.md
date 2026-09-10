@@ -56,7 +56,7 @@ same in-scope check used everywhere else.
   (derived, not invented, either way). `status` = `mapped` default;
   `unmapped` for the null-class / clearing-pair accounts; `catch_all` for
   the two hand-ruled migration parking codes (ADR-0005). `deprecated` ended
-  up unused this round — every suspense/clearing candidate turned out to be
+  up unused this round. Every suspense/clearing candidate turned out to be
   either a real live clearing account or a catch-all code, not something
   actually being retired from the target CoA.
 - Review report (comment on #3 + `docs/mapping-review.md`): the ~27 target
@@ -145,5 +145,5 @@ Added to `docs/definitions.md`: `status` (target-CoA disposition) and
 `source_usage` (is the source system still posting to it) are two different
 questions and must never share one column, on pain of exactly the
 `deprecated`-a-live-account mistake above. `catch_all` (ADR-0005) is scoped
-narrowly on purpose — it names the specific pattern of `199999`/`999999`,
+narrowly on purpose. It names the specific pattern of `199999`/`999999`,
 not a general "weird account" bucket.

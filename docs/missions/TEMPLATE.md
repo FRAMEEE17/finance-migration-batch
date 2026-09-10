@@ -14,7 +14,7 @@ ADR that constrain this mission.
 
 `notebooks/NN-slug.ipynb`, if one exists for this mission. What it checked
 before the mission's checks below were locked, and what it changed about
-the plan (or "none" — didn't need one / nothing it found changed anything).
+the plan (or "none": didn't need one, or nothing it found changed anything).
 
 ## Desired outcomes
 

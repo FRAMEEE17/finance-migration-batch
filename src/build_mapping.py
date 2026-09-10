@@ -146,7 +146,7 @@ def compute_source_usage(con) -> dict:
     full source (not local_amount, which is unreliable for at least the
     clearing-pair accounts), or appears outside the current scope
     (a later period, or a company other than 1000). retired otherwise.
-    Computed over the full table, not scope-filtered — a "live" verdict
+    Computed over the full table, not scope-filtered. A "live" verdict
     must survive being asked about the account's whole history, not just
     the slice this ticket happens to be looking at."""
     rows = con.execute(f"""
@@ -328,7 +328,7 @@ def _build_report_text(groups, clearing, pairs, catch_all, dirty) -> str:
         "\n## 3. Clearing pairs (`status=unmapped`, `account_role=clearing_pair`, "
         f"`dq_flag={DQ_FLAG_PAIR}`)\n"
         "Debit-only / credit-only pairs. `local_amount` is 0 on every row for "
-        "all six despite real debit/credit activity below — do not read this "
+        "all six despite real debit/credit activity below. Do not read this "
         "set as immaterial from `local_amount` alone. Filed against issue #5. "
         "Stay `unmapped` until a human names the real pair target; never map "
         "one side without the other.\n"
@@ -345,7 +345,7 @@ def _build_report_text(groups, clearing, pairs, catch_all, dirty) -> str:
         "companies and 13 periods in the full source (see ADR-0005). Each "
         "keeps its own code as `target_account` and reports on its own line, "
         "never merged with the other even though both fall under `account_class` "
-        "`A.X` — within the current scope they land in different "
+        "`A.X`. Within the current scope they land in different "
         "`financial_statement_category` values and folding them together "
         "would misclassify one of them. `fs_category_flag` is forced true for "
         "both, and both are excluded from section 5's `A.X` vote.\n"

@@ -48,7 +48,7 @@ Real, single-purpose clearing/suspense accounts. All confirmed `source_usage=liv
 | `199300` | Intercompany Clearing | 218 | 6,690,828 |
 
 ## 3. Clearing pairs (`status=unmapped`, `account_role=clearing_pair`, `dq_flag=local_amount_zero_but_dr_cr_nonzero`)
-Debit-only / credit-only pairs. `local_amount` is 0 on every row for all six despite real debit/credit activity below — do not read this set as immaterial from `local_amount` alone. Filed against issue #5. Stay `unmapped` until a human names the real pair target; never map one side without the other.
+Debit-only / credit-only pairs. `local_amount` is 0 on every row for all six despite real debit/credit activity below. Do not read this set as immaterial from `local_amount` alone. Filed against issue #5. Stay `unmapped` until a human names the real pair target; never map one side without the other.
 
 | gl_account | sum debit | sum credit | lines |
 |---|---|---|---|
@@ -60,7 +60,7 @@ Debit-only / credit-only pairs. `local_amount` is 0 on every row for all six des
 | `205030` | 0 | 980,588 | 9 |
 
 ## 4. Catch-all accounts (`status=catch_all`, ADR-0005)
-Migration parking codes, not real accounts: many unrelated `account_description` values on the same code, active across all 4 companies and 13 periods in the full source (see ADR-0005). Each keeps its own code as `target_account` and reports on its own line, never merged with the other even though both fall under `account_class` `A.X` — within the current scope they land in different `financial_statement_category` values and folding them together would misclassify one of them. `fs_category_flag` is forced true for both, and both are excluded from section 5's `A.X` vote.
+Migration parking codes, not real accounts: many unrelated `account_description` values on the same code, active across all 4 companies and 13 periods in the full source (see ADR-0005). Each keeps its own code as `target_account` and reports on its own line, never merged with the other even though both fall under `account_class` `A.X`. Within the current scope they land in different `financial_statement_category` values and folding them together would misclassify one of them. `fs_category_flag` is forced true for both, and both are excluded from section 5's `A.X` vote.
 
 | gl_account | financial_statement_category (in scope) | lines (in scope) | net local (in scope) | distinct descriptions (in scope) |
 |---|---|---|---|---|

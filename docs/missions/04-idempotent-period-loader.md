@@ -71,7 +71,7 @@ triggers it.
   through must leave whatever was there before the run untouched (no
   partial period).
 - Console log per run: row count, distinct document count,
-  `SUM(local_amount)`, timestamp — the same three numbers the idempotency
+  `SUM(local_amount)`, timestamp. The same three numbers the idempotency
   check compares.
 
 ## Deterministic checks
@@ -108,7 +108,7 @@ triggers it.
   the full audit trail around it.
 - No backfill to P02/P03 or other companies. #10.
 - No reversal-pair detection. #7.
-- Not proving `unmapped_doc_type` fires correctly — no case exists in this
+- Not proving `unmapped_doc_type` fires correctly. No case exists in this
   period to prove it against (see Exploration). The column/logic still
   needs to exist; just can't be checked here.
 
@@ -120,7 +120,7 @@ triggers it.
   excluded); `CL` isn't present this period so the same rule applies by
   extension, not by evidence
 - the 1 unbalanced document (and all its lines) is excluded from
-  `fact_gl_line` entirely, not loaded-then-flagged — matches the "never
+  `fact_gl_line` entirely, not loaded-then-flagged, matching the "never
   publish" wording, unlike `OPENING_BALANCE`'s "separate flag" wording
 - unmapped-status accounts still load into `fact_gl_line` with
   `target_account` blank (the `unmapped_account` mismatch cause is
@@ -142,8 +142,8 @@ Built with four additions on top of the original before-build approval,
 all requested before code: `is_opening_balance`/`is_closing_entry` as real
 columns (not a side table), a `fact_gl_line_rejected` table so an excluded
 document leaves a trace instead of vanishing, `unbalanced_document`
-checked on the whole document's debit/credit (never `local_amount` alone
-— the same lesson mission 01 already paid for), and a synthetic-row test
+checked on the whole document's debit/credit (never `local_amount` alone,
+the same lesson mission 01 already paid for), and a synthetic-row test
 proving `unmapped_doc_type` rejects an unrecognized type even though no
 real case exists in P01 to prove it against.
 

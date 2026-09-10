@@ -219,7 +219,7 @@ the source system today. That is a separate question, answered by
 **`target_account`** is either the source's own `account_class` (the
 default, for an ordinary account rolling up into the ~27-class target CoA),
 or the account's own `source_account` code, when `account_role` is
-`clearing`, `clearing_pair`, or the row's `status` is `catch_all` — these
+`clearing`, `clearing_pair`, or the row's `status` is `catch_all`. These
 represent operational codes that keep their own identity rather than
 rolling into a class. Never a class code (`account_class`) for a
 `catch_all` row: two catch-all codes can carry different
@@ -231,7 +231,7 @@ source data, not the current migration scope: `live` if the account has any
 `debit_amount` or `credit_amount` activity anywhere (any company, any
 period, in or out of scope), or appears in a period after the current
 scope's latest period, or in a company outside the current scope. `retired`
-otherwise. Never computed from `local_amount` alone — see the
+otherwise. Never computed from `local_amount` alone. See the
 `local_amount_zero_but_dr_cr_nonzero` dq_flag below for why. A third value,
 `dormant`, is deliberately not defined yet: no criteria for it exist, and
 adding it without one would just be a guess wearing a label.
@@ -244,7 +244,7 @@ sense read together, see `pair_id`). Blank for an ordinary account.
 **`dq_flag`** is optional metadata: a named data-quality concern to keep
 visible, not silently drop. `local_amount_zero_but_dr_cr_nonzero` marks a
 `gl_account` where every row's `local_amount` is 0 while `debit_amount` /
-`credit_amount` are materially nonzero — a `local_amount`-only view of
+`credit_amount` are materially nonzero. A `local_amount`-only view of
 this account is misleading. Filed against issue #5.
 
 **`pair_id`** links the two sides of a `clearing_pair`: same value on both
