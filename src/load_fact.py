@@ -1,15 +1,17 @@
-"""Idempotent period loader. Ticket 4 / Mission 04.
+"""Idempotent period loader. Ticket 4 / Mission 04, gated by Ticket 5 /
+Mission 05.
 
 Loads stg_gl -> fact_gl_line for one company + period. Replaces the whole
 period every run: delete this period's rows, re-insert, one transaction.
 Two runs back to back give the same row count, distinct document count,
 and SUM(local_amount).
 
-What gets excluded entirely (never lands in fact_gl_line, goes to
-fact_gl_line_rejected instead):
-  - unbalanced_document: the whole document, every line, not just the
-    line that doesn't balance (docs/business-rules.md)
-  - unmapped_doc_type: a document_type outside the known catalog
+Every row is checked by src/quality_gate.py before this insert runs.
+Blocking findings (unbalanced_document, duplicate_source, map_fanout,
+null_key_column, unmapped_doc_type) never reach fact_gl_line; the reason
+is in dq_violations, not silently dropped. Non-blocking findings
+(local_amount_imbalance, unmapped_account, catch_all_account) still load
+normally, just get logged alongside.
 
 What stays in fact_gl_line but flagged, not excluded:
   - is_opening_balance / is_closing_entry: real rows, just not part of
@@ -23,18 +25,13 @@ import sys
 import duckdb  # type: ignore
 
 from config import REPO_ROOT, WAREHOUSE_DB
+from quality_gate import OPENING_BALANCE_TYPE, CLOSING_ENTRY_TYPE, run_gate
 
 COMPANY_CODE = 1000
 FISCAL_YEAR = 2024
 FISCAL_PERIOD = 1
 
 MAP_CSV = REPO_ROOT / "map_account.csv"
-
-# docs/business-rules.md doc_type catalog
-COUNTED_DOC_TYPES = {"SA", "DR", "KR", "DZ", "KZ", "AA", "WE", "WL", "HR", "IC"}
-OPENING_BALANCE_TYPE = "OPENING_BALANCE"
-CLOSING_ENTRY_TYPE = "CL"
-KNOWN_DOC_TYPES = COUNTED_DOC_TYPES | {OPENING_BALANCE_TYPE, CLOSING_ENTRY_TYPE}
 
 PERIOD_FILTER = (
     f"company_code = {COMPANY_CODE} AND fiscal_year = {FISCAL_YEAR} "
@@ -52,9 +49,11 @@ def load_map_account(con) -> None:
 
 
 def ensure_tables(con) -> None:
-    """Create fact_gl_line / fact_gl_line_rejected once. Later runs only
-    delete and re-insert this period's slice, never recreate the table -
-    other periods' rows (once #10 backfills them) must survive a P01 run."""
+    """Create fact_gl_line once. Later runs only delete and re-insert this
+    period's slice, never recreate the table - other periods' rows (once
+    #10 backfills them) must survive a P01 run. fact_gl_line_rejected
+    (ticket 4's placeholder) is dropped here: dq_violations, owned by
+    src/quality_gate.py, replaces it."""
     con.execute("""
         CREATE TABLE IF NOT EXISTS fact_gl_line AS
         SELECT s.*,
@@ -65,14 +64,7 @@ def ensure_tables(con) -> None:
                NULL::TIMESTAMP AS loaded_at
         FROM stg_gl s WHERE 1 = 0
     """)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS fact_gl_line_rejected AS
-        SELECT company_code, document_id, line_number, fiscal_year, fiscal_period,
-               document_type,
-               ''::VARCHAR AS reject_reason,
-               NULL::TIMESTAMP AS rejected_at
-        FROM stg_gl WHERE 1 = 0
-    """)
+    con.execute("DROP TABLE IF EXISTS fact_gl_line_rejected")
 
 
 def verify_rollback_safety(con) -> None:
@@ -100,19 +92,11 @@ def verify_rollback_safety(con) -> None:
 
 
 def load_period(con) -> dict:
-    known_types_sql = ",".join(f"'{t}'" for t in KNOWN_DOC_TYPES)
-
-    unbalanced_docs = con.execute(f"""
-        SELECT document_id FROM stg_gl WHERE {PERIOD_FILTER}
-        GROUP BY 1 HAVING ROUND(SUM(debit_amount) - SUM(credit_amount), 2) != 0
-    """).fetchall()
-    unbalanced_ids = [r[0] for r in unbalanced_docs]
-    unbalanced_sql = ",".join(f"'{d}'" for d in unbalanced_ids) if unbalanced_ids else "NULL"
-
     con.execute("BEGIN TRANSACTION")
     try:
+        gate_counts = run_gate(con, PERIOD_FILTER)
+
         con.execute(f"DELETE FROM fact_gl_line WHERE {PERIOD_FILTER}")
-        con.execute(f"DELETE FROM fact_gl_line_rejected WHERE {PERIOD_FILTER}")
 
         con.execute(f"""
             INSERT INTO fact_gl_line
@@ -124,20 +108,15 @@ def load_period(con) -> dict:
             FROM stg_gl s
             LEFT JOIN map_account m ON m.source_account = s.gl_account
             WHERE {PERIOD_FILTER}
-              AND s.document_type IN ({known_types_sql})
-              AND s.document_id NOT IN ({unbalanced_sql})
-        """)
-
-        con.execute(f"""
-            INSERT INTO fact_gl_line_rejected
-            SELECT company_code, document_id, line_number, fiscal_year, fiscal_period,
-                   document_type,
-                   CASE WHEN document_type NOT IN ({known_types_sql}) THEN 'unmapped_doc_type'
-                        ELSE 'unbalanced_document' END,
-                   now()
-            FROM stg_gl
-            WHERE {PERIOD_FILTER}
-              AND (document_type NOT IN ({known_types_sql}) OR document_id IN ({unbalanced_sql}))
+              AND NOT EXISTS (
+                  SELECT 1 FROM dq_violations v
+                  WHERE v.blocking = true
+                    AND v.company_code = s.company_code
+                    AND v.document_id = s.document_id
+                    AND v.fiscal_year = s.fiscal_year
+                    AND v.fiscal_period = s.fiscal_period
+                    AND (v.line_number IS NULL OR v.line_number = s.line_number)
+              )
         """)
 
         con.execute("COMMIT")
@@ -149,11 +128,10 @@ def load_period(con) -> dict:
         SELECT COUNT(*), COUNT(DISTINCT document_id), ROUND(SUM(local_amount), 2)
         FROM fact_gl_line WHERE {PERIOD_FILTER}
     """).fetchone()
-    rejected = con.execute(f"""
-        SELECT reject_reason, COUNT(*) FROM fact_gl_line_rejected
-        WHERE {PERIOD_FILTER} GROUP BY 1
-    """).fetchall()
-    return {"rows": rows, "documents": docs, "sum_local_amount": total, "rejected": dict(rejected)}
+    return {
+        "rows": rows, "documents": docs, "sum_local_amount": total,
+        "dq_violations": gate_counts,
+    }
 
 
 def main() -> int:
@@ -169,7 +147,9 @@ def main() -> int:
         f"{result['rows']:,} rows, {result['documents']:,} documents, "
         f"SUM(local_amount)={result['sum_local_amount']:,.2f}"
     )
-    print(f"rejected: {result['rejected'] or 'none'}")
+    print("dq_violations:")
+    for name, count in result["dq_violations"].items():
+        print(f"  {name:<24} {count}")
     return 0
 
 

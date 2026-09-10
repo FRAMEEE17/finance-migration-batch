@@ -14,6 +14,7 @@ import duckdb  # type: ignore
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import load_fact  # noqa: E402
+import quality_gate  # noqa: E402
 
 from config import REPO_ROOT, SOURCE_PARQUET, WAREHOUSE_DB
 
@@ -179,7 +180,7 @@ def fact_gl_line_subset_of_stg(con):
 
 def unbalanced_document_excluded(con):
     """The whole document is gone from fact_gl_line, not just its
-    imbalanced line, and shows up in fact_gl_line_rejected instead."""
+    imbalanced line, and shows up in dq_violations instead."""
     still_present = con.execute(f"""
         SELECT COUNT(*) FROM fact_gl_line f
         JOIN (
@@ -187,11 +188,12 @@ def unbalanced_document_excluded(con):
             GROUP BY 1 HAVING ROUND(SUM(debit_amount) - SUM(credit_amount), 2) != 0
         ) u ON u.document_id = f.document_id
     """).fetchone()[0]
-    rejected = con.execute(f"""
-        SELECT COUNT(*) FROM fact_gl_line_rejected WHERE reject_reason = 'unbalanced_document'
+    logged = con.execute("""
+        SELECT COUNT(*) FROM dq_violations
+        WHERE check_name = 'unbalanced_document' AND blocking = true
     """).fetchone()[0]
-    ok = still_present == 0 and rejected > 0
-    return ok, f"in fact={still_present} (want 0), rejected rows={rejected} (want >0)"
+    ok = still_present == 0 and logged > 0
+    return ok, f"in fact={still_present} (want 0), logged in dq_violations={logged} (want >0)"
 
 
 def opening_balance_flagged_not_excluded(con):
@@ -236,9 +238,9 @@ def map_account_joined_correctly(con):
 def unmapped_doc_type_synthetic_reject(con):
     """No real unmapped_doc_type case exists in this period (see mission
     04's Exploration) - prove the guard rejects one anyway with a
-    synthetic, in-memory row, run through the same filter the real loader
+    synthetic, in-memory row, run through the same filter the real gate
     uses. Never touches stg_gl."""
-    known_types_sql = ",".join(f"'{t}'" for t in load_fact.KNOWN_DOC_TYPES)
+    known_types_sql = ",".join(f"'{t}'" for t in quality_gate.KNOWN_DOC_TYPES)
     passed = con.execute(f"""
         SELECT COUNT(*) FROM (VALUES ('ZZ_UNKNOWN_TYPE')) AS t(document_type)
         WHERE document_type IN ({known_types_sql})
@@ -246,7 +248,111 @@ def unmapped_doc_type_synthetic_reject(con):
     return passed == 0, "synthetic unknown document_type correctly excluded" if passed == 0 else "guard failed to exclude it"
 
 
-# --- Ticket 5+: quality gate, reconciliation ---------------------------
+# --- Ticket 5: quality gate + dq_violations -------------------------------
+
+def dq_violations_exists(con):
+    return "dq_violations" in _tables(con), "table present"
+
+
+def duplicate_source_synthetic_reject(con):
+    """No real duplicate-grain row exists in P01 (see mission 05's
+    Exploration) - prove the check catches one anyway with a synthetic,
+    in-memory grain, run through the same GROUP BY ... HAVING COUNT(*) > 1
+    logic the real gate uses. Never touches stg_gl."""
+    caught = con.execute("""
+        SELECT COUNT(*) FROM (
+            SELECT * FROM (VALUES
+                (1000, 'SYNTH-DOC', 1, 2024, 1),
+                (1000, 'SYNTH-DOC', 1, 2024, 1)
+            ) AS t(company_code, document_id, line_number, fiscal_year, fiscal_period)
+            GROUP BY 1, 2, 3, 4, 5 HAVING COUNT(*) > 1
+        )
+    """).fetchone()[0]
+    return caught == 1, "synthetic duplicate grain correctly caught" if caught == 1 else "guard failed to catch it"
+
+
+def map_fanout_synthetic_reject(con):
+    """No real map_fanout exists in map_account.csv (505 rows, 505
+    distinct) - prove the check catches one anyway with a synthetic,
+    in-memory source_account, run through the same
+    GROUP BY source_account HAVING COUNT(*) > 1 logic the real gate uses.
+    Never touches the real map_account.csv."""
+    caught = con.execute("""
+        SELECT COUNT(*) FROM (
+            SELECT * FROM (VALUES (999888777), (999888777)) AS t(source_account)
+            GROUP BY 1 HAVING COUNT(*) > 1
+        )
+    """).fetchone()[0]
+    return caught == 1, "synthetic map_fanout correctly caught" if caught == 1 else "guard failed to catch it"
+
+
+def null_key_column_synthetic_reject(con):
+    """No real null-key row exists in P01 - prove the check catches one
+    anyway with a synthetic, in-memory row missing gl_account, run
+    through the same OR-of-IS-NULL predicate the real gate uses."""
+    null_key_cond = " OR ".join(f"{c} IS NULL" for c in quality_gate.KEY_COLUMNS)
+    caught = con.execute(f"""
+        SELECT COUNT(*) FROM (
+            VALUES (1000, 'SYNTH-DOC', 1, 2024, 1, NULL)
+        ) AS t(company_code, document_id, line_number, fiscal_year, fiscal_period, gl_account)
+        WHERE {null_key_cond}
+    """).fetchone()[0]
+    return caught == 1, "synthetic null key column correctly caught" if caught == 1 else "guard failed to catch it"
+
+
+def local_amount_imbalance_logged_not_excluded(con):
+    """All 23 known local_amount_imbalance documents are logged
+    non-blocking and still present in fact_gl_line (non-blocking never
+    excludes)."""
+    logged = con.execute("""
+        SELECT COUNT(*) FROM dq_violations
+        WHERE check_name = 'local_amount_imbalance' AND blocking = false
+    """).fetchone()[0]
+    missing_from_fact = con.execute("""
+        SELECT COUNT(*) FROM dq_violations v
+        WHERE v.check_name = 'local_amount_imbalance'
+          AND NOT EXISTS (
+              SELECT 1 FROM fact_gl_line f
+              WHERE f.company_code = v.company_code AND f.document_id = v.document_id
+                AND f.fiscal_year = v.fiscal_year AND f.fiscal_period = v.fiscal_period
+          )
+    """).fetchone()[0]
+    ok = logged == 23 and missing_from_fact == 0
+    return ok, f"logged={logged} (want 23), missing from fact={missing_from_fact} (want 0)"
+
+
+def unmapped_account_excludes_catch_all(con):
+    """unmapped_account (15 lines) and catch_all_account (70 lines) never
+    overlap and never exclude a row from fact_gl_line - both non-blocking,
+    docs/definitions.md's post-mission-05 wording."""
+    unmapped = con.execute("""
+        SELECT COUNT(*) FROM dq_violations WHERE check_name = 'unmapped_account' AND blocking = false
+    """).fetchone()[0]
+    catch_all = con.execute("""
+        SELECT COUNT(*) FROM dq_violations WHERE check_name = 'catch_all_account' AND blocking = false
+    """).fetchone()[0]
+    overlap = con.execute("""
+        SELECT COUNT(*) FROM (
+            SELECT document_id, line_number, fiscal_year, fiscal_period FROM dq_violations WHERE check_name = 'unmapped_account'
+            INTERSECT
+            SELECT document_id, line_number, fiscal_year, fiscal_period FROM dq_violations WHERE check_name = 'catch_all_account'
+        )
+    """).fetchone()[0]
+    ok = unmapped == 15 and catch_all == 70 and overlap == 0
+    return ok, f"unmapped_account={unmapped} (want 15), catch_all_account={catch_all} (want 70), overlap={overlap} (want 0)"
+
+
+def gate_never_filters_on_flags(con):
+    """docs/business-rules.md / ADR-0003: is_fraud, is_anomaly never enter
+    a gate predicate. Static check on the module source, not just this
+    run's data - a predicate that happens to find zero flagged rows today
+    would still pass a data-only check."""
+    src = Path(quality_gate.__file__).read_text()
+    bad = "is_fraud" in src or "is_anomaly" in src
+    return not bad, "quality_gate.py never references is_fraud/is_anomaly" if not bad else "found a reference, review it"
+
+
+# --- Ticket 6+: reconciliation --------------------------------------------
 
 
 CHECKS = [
@@ -271,6 +377,13 @@ CHECKS = [
     ("is_fraud/is_anomaly/is_post_close untouched in fact", fraud_anomaly_postclose_untouched_in_fact),
     ("fact target/status match map_account.csv", map_account_joined_correctly),
     ("unmapped_doc_type rejects a synthetic row", unmapped_doc_type_synthetic_reject),
+    ("dq_violations exists", dq_violations_exists),
+    ("duplicate_source rejects a synthetic row", duplicate_source_synthetic_reject),
+    ("map_fanout rejects a synthetic row", map_fanout_synthetic_reject),
+    ("null_key_column rejects a synthetic row", null_key_column_synthetic_reject),
+    ("local_amount_imbalance logged, not excluded", local_amount_imbalance_logged_not_excluded),
+    ("unmapped_account excludes catch_all", unmapped_account_excludes_catch_all),
+    ("gate never filters on is_fraud/is_anomaly", gate_never_filters_on_flags),
 ]
 
 

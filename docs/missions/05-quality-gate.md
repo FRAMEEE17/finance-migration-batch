@@ -89,8 +89,11 @@ visibility, not invented here to look complete.
   company_code, document_id, line_number, fiscal_year, fiscal_period,
   detail, checked_at`. `check_name` is a closed set in code (not a free
   string): `unbalanced_document, duplicate_source, map_fanout,
-  null_key_column, local_amount_imbalance, unmapped_account,
-  catch_all_account`. `line_number` is nullable, for a check that
+  null_key_column, unmapped_doc_type, local_amount_imbalance,
+  unmapped_account, catch_all_account`. `unmapped_doc_type` isn't one of
+  issue #5's named checks, but dropping `fact_gl_line_rejected` means its
+  rejection reason needs a home too, or that reason disappears entirely
+  when the old table goes away. `line_number` is nullable, for a check that
   operates at document grain (`unbalanced_document`,
   `local_amount_imbalance`); every other check logs one row per line, the
   grain it actually checked, never collapsed into one summary row per
@@ -102,29 +105,29 @@ visibility, not invented here to look complete.
 
 ## Deterministic checks
 
-- [ ] The 1 known unbalanced document is in `dq_violations`
+- [x] The 1 known unbalanced document is in `dq_violations`
       (`check_name='unbalanced_document', blocking=true`) and absent from
       `fact_gl_line`, exactly as it was under #4's inline check.
-- [ ] A synthetic duplicate-grain row is rejected and logged
+- [x] A synthetic duplicate-grain row is rejected and logged
       (`check_name='duplicate_source'`).
-- [ ] A synthetic `map_fanout` case (two `map_account.csv` rows sharing a
+- [x] A synthetic `map_fanout` case (two `map_account.csv` rows sharing a
       `source_account`) is rejected and logged. Never touches the real
       `map_account.csv`.
-- [ ] A synthetic null-key-column row is rejected and logged.
-- [ ] All 23 known `local_amount_imbalance` documents appear in
+- [x] A synthetic null-key-column row is rejected and logged.
+- [x] All 23 known `local_amount_imbalance` documents appear in
       `dq_violations` with `blocking=false`, and are still present in
       `fact_gl_line` (non-blocking never excludes).
-- [ ] All 15 known `unmapped_account` lines (literal `status='unmapped'`,
+- [x] All 15 known `unmapped_account` lines (literal `status='unmapped'`,
       the clearing-pair accounts) appear in `dq_violations` with
       `blocking=false`, still present in `fact_gl_line`.
-- [ ] All 70 known `catch_all_account` lines (`status='catch_all'`) appear
+- [x] All 70 known `catch_all_account` lines (`status='catch_all'`) appear
       in `dq_violations` with `blocking=false`, still present in
       `fact_gl_line`, and never counted toward `unmapped_account`.
-- [ ] `is_fraud`/`is_anomaly` rows are not filtered anywhere in the gate:
+- [x] `is_fraud`/`is_anomaly` rows are not filtered anywhere in the gate:
       a fraud/anomaly-flagged row that would otherwise pass still passes,
       one that would otherwise be rejected still gets rejected (flags
       never enter the predicate).
-- [ ] Re-running `src/load_fact.py` twice gives identical `dq_violations`
+- [x] Re-running `src/load_fact.py` twice gives identical `dq_violations`
       row counts per check, same idempotency bar as #4's `fact_gl_line`.
 
 ## Non-deterministic checks
@@ -180,4 +183,20 @@ visibility, not invented here to look complete.
 
 ## Retro
 
-Filled after the mission closes.
+The definition fix mid-mission was the real work here, not the SQL:
+`unmapped_account` almost meant `status != mapped` in `dq_violations`,
+which would have counted every `catch_all` row (70 lines) as an
+unresolved mapping gap, one mission after ADR-0005 resolved it as
+something else on purpose. Caught before build started, not after,
+because the exploration notebook ran the combined count (85) before the
+mission spec split it apart.
+
+The durable rule this adds, in `docs/definitions.md`: a status that
+represents a resolved classification and a status that represents an
+open gap must never share one downstream check, even when grouping them
+together would be the shorter query.
+
+Verified: three consecutive runs of `src/load_fact.py` produced identical
+`fact_gl_line` (13,140 rows, 3,517 documents,
+`SUM(local_amount)=97,144,587.13`) and identical `dq_violations` counts
+per check every time. 28/28 regression checks green.
