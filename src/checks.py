@@ -8,8 +8,12 @@ deterministic: it computes a value and compares it, no judgement.
 
 import csv
 import sys
+from pathlib import Path
 
 import duckdb  # type: ignore
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import load_fact  # noqa: E402
 
 from config import REPO_ROOT, SOURCE_PARQUET, WAREHOUSE_DB
 
@@ -159,6 +163,89 @@ def fraud_anomaly_accounts_not_excluded(con):
 
 
 # --- Ticket 4: idempotent loader ----------------------------------------
+
+def fact_gl_line_scope_only(con):
+    bad = con.execute(f"""
+        SELECT COUNT(*) FROM fact_gl_line WHERE NOT ({load_fact.PERIOD_FILTER})
+    """).fetchone()[0]
+    return bad == 0, f"{bad} rows outside company 1000 / 2024-01" if bad else "scope only"
+
+
+def fact_gl_line_subset_of_stg(con):
+    fact_rows = con.execute("SELECT COUNT(*) FROM fact_gl_line").fetchone()[0]
+    stg_rows = con.execute(f"SELECT COUNT(*) FROM stg_gl WHERE {load_fact.PERIOD_FILTER}").fetchone()[0]
+    return fact_rows <= stg_rows, f"fact={fact_rows:,}  stg (same scope)={stg_rows:,}"
+
+
+def unbalanced_document_excluded(con):
+    """The whole document is gone from fact_gl_line, not just its
+    imbalanced line, and shows up in fact_gl_line_rejected instead."""
+    still_present = con.execute(f"""
+        SELECT COUNT(*) FROM fact_gl_line f
+        JOIN (
+            SELECT document_id FROM stg_gl WHERE {load_fact.PERIOD_FILTER}
+            GROUP BY 1 HAVING ROUND(SUM(debit_amount) - SUM(credit_amount), 2) != 0
+        ) u ON u.document_id = f.document_id
+    """).fetchone()[0]
+    rejected = con.execute(f"""
+        SELECT COUNT(*) FROM fact_gl_line_rejected WHERE reject_reason = 'unbalanced_document'
+    """).fetchone()[0]
+    ok = still_present == 0 and rejected > 0
+    return ok, f"in fact={still_present} (want 0), rejected rows={rejected} (want >0)"
+
+
+def opening_balance_flagged_not_excluded(con):
+    """OPENING_BALANCE rows stay in fact_gl_line, flagged, not dropped -
+    different rule from unbalanced_document (docs/business-rules.md)."""
+    got = con.execute("""
+        SELECT COUNT(*) FROM fact_gl_line WHERE is_opening_balance
+    """).fetchone()[0]
+    want = con.execute(f"""
+        SELECT COUNT(*) FROM stg_gl
+        WHERE {load_fact.PERIOD_FILTER} AND document_type = '{load_fact.OPENING_BALANCE_TYPE}'
+    """).fetchone()[0]
+    return got == want, f"flagged in fact={got}  in stg (same scope)={want}"
+
+
+def fraud_anomaly_postclose_untouched_in_fact(con):
+    """is_fraud/is_anomaly/is_post_close pass through fact_gl_line
+    unchanged for every row that actually made it in (ADR-0003 for the
+    first two; is_post_close is a timing fact, not a defect, so it's
+    never re-derived either) - ignores rejected rows, those aren't in
+    fact_gl_line to begin with."""
+    bad = con.execute(f"""
+        SELECT COUNT(*) FROM fact_gl_line f
+        JOIN stg_gl s USING (company_code, document_id, line_number, fiscal_year, fiscal_period)
+        WHERE f.is_fraud != s.is_fraud OR f.is_anomaly != s.is_anomaly OR f.is_post_close != s.is_post_close
+    """).fetchone()[0]
+    return bad == 0, f"{bad} rows where fact disagrees with stg on is_fraud/is_anomaly/is_post_close"
+
+
+def map_account_joined_correctly(con):
+    """Every loaded row's target_account/map_status matches map_account.csv
+    for its gl_account, not something computed inline."""
+    bad = con.execute("""
+        SELECT COUNT(*) FROM fact_gl_line f
+        JOIN map_account m ON m.source_account = f.gl_account
+        WHERE f.target_account IS DISTINCT FROM m.target_account
+           OR f.map_status IS DISTINCT FROM m.status
+    """).fetchone()[0]
+    return bad == 0, f"{bad} rows where fact's target/status disagrees with map_account.csv"
+
+
+def unmapped_doc_type_synthetic_reject(con):
+    """No real unmapped_doc_type case exists in this period (see mission
+    04's Exploration) - prove the guard rejects one anyway with a
+    synthetic, in-memory row, run through the same filter the real loader
+    uses. Never touches stg_gl."""
+    known_types_sql = ",".join(f"'{t}'" for t in load_fact.KNOWN_DOC_TYPES)
+    passed = con.execute(f"""
+        SELECT COUNT(*) FROM (VALUES ('ZZ_UNKNOWN_TYPE')) AS t(document_type)
+        WHERE document_type IN ({known_types_sql})
+    """).fetchone()[0]
+    return passed == 0, "synthetic unknown document_type correctly excluded" if passed == 0 else "guard failed to exclude it"
+
+
 # --- Ticket 5+: quality gate, reconciliation ---------------------------
 
 
@@ -177,6 +264,13 @@ CHECKS = [
     ("dim_account row count == distinct gl_account", dim_account_row_count),
     ("gl_account -> account_class is 1:1", gl_account_to_class_is_1to1),
     ("fraud/anomaly accounts not excluded", fraud_anomaly_accounts_not_excluded),
+    ("fact_gl_line is scope-only", fact_gl_line_scope_only),
+    ("fact_gl_line is a subset of stg_gl", fact_gl_line_subset_of_stg),
+    ("unbalanced document excluded from fact", unbalanced_document_excluded),
+    ("opening_balance flagged, not excluded", opening_balance_flagged_not_excluded),
+    ("is_fraud/is_anomaly/is_post_close untouched in fact", fraud_anomaly_postclose_untouched_in_fact),
+    ("fact target/status match map_account.csv", map_account_joined_correctly),
+    ("unmapped_doc_type rejects a synthetic row", unmapped_doc_type_synthetic_reject),
 ]
 
 

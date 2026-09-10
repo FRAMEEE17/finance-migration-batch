@@ -76,20 +76,20 @@ triggers it.
 
 ## Deterministic checks
 
-- [ ] `fact_gl_line` contains only `company_code=1000, fiscal_year=2024,
+- [x] `fact_gl_line` contains only `company_code=1000, fiscal_year=2024,
       fiscal_period=1` rows. No other scope leaks in.
-- [ ] Running the loader twice back to back gives identical row count,
+- [x] Running the loader twice back to back gives identical row count,
       distinct `document_id` count, and `SUM(local_amount)` (to the cent).
-- [ ] The 1 known unbalanced document is absent from `fact_gl_line` and
+- [x] The 1 known unbalanced document is absent from `fact_gl_line` and
       still present in `stg_gl`.
-- [ ] Row count in `fact_gl_line` for this period ≤ row count in `stg_gl`
+- [x] Row count in `fact_gl_line` for this period ≤ row count in `stg_gl`
       for the same scope (nothing invented, only ever a subset).
-- [ ] Every `fact_gl_line` row's `gl_account` appears in `map_account.csv`
+- [x] Every `fact_gl_line` row's `gl_account` appears in `map_account.csv`
       (`target_account`/`map_status` came from the approved mapping, not
       guessed inline).
-- [ ] `is_fraud`, `is_anomaly`, `is_post_close` values on loaded rows match
+- [x] `is_fraud`, `is_anomaly`, `is_post_close` values on loaded rows match
       `stg_gl` exactly (untouched, not re-derived).
-- [ ] Killing the load mid-transaction (simulated) leaves the prior
+- [x] Killing the load mid-transaction (simulated) leaves the prior
       `fact_gl_line` state for this period exactly as it was before the run.
 
 ## Non-deterministic checks
@@ -138,4 +138,23 @@ triggers it.
 
 ## Retro
 
-Filled after the mission closes.
+Built with four additions on top of the original before-build approval,
+all requested before code: `is_opening_balance`/`is_closing_entry` as real
+columns (not a side table), a `fact_gl_line_rejected` table so an excluded
+document leaves a trace instead of vanishing, `unbalanced_document`
+checked on the whole document's debit/credit (never `local_amount` alone
+— the same lesson mission 01 already paid for), and a synthetic-row test
+proving `unmapped_doc_type` rejects an unrecognized type even though no
+real case exists in P01 to prove it against.
+
+The one durable rule this mission adds: **a loader's exclusion rules need
+a real place for what they excluded to land, even before the ticket that
+owns the formal version exists.** `fact_gl_line_rejected` is deliberately
+thin (grain + reason + timestamp, no severity or detail columns) because
+#5 owns the real `dq_violations` design; this mission's job was only to
+not let two live document rows disappear without a trace while #5 doesn't
+exist yet.
+
+Verified: three consecutive runs of `src/load_fact.py` produced identical
+`13,140 rows, 3,517 documents, SUM(local_amount)=97,144,587.13` every
+time. 21/21 regression checks green.
