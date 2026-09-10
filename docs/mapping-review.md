@@ -1,8 +1,10 @@
 # Mapping review: draft for #3
 
-Draft, not approved. See `docs/missions/01-chart-of-accounts-mapping.md`.
+Draft, not approved. See `docs/missions/01-chart-of-accounts-mapping.md` and `docs/adr/0005-account-status-catch-all.md`.
 
 ## 1. Target groups (27 account_class values)
+
+Ordinary rollup accounts: `target_account` = `account_class`.
 
 | class | name | gl accounts | lines | net local |
 |---|---|---|---|---|
@@ -34,18 +36,8 @@ Draft, not approved. See `docs/missions/01-chart-of-accounts-mapping.md`.
 | `E.D` | Treasury Stock | 1 | 148 | 2,266,032 |
 | `None` | None | 6 | 41 | 0 |
 
-## 2. Unmapped (no account_class, needs your ruling)
-
-| gl_account | description | lines | net local |
-|---|---|---|---|
-| `115020` | None | 4 | 0 |
-| `115021` | None | 10 | 0 |
-| `115030` | None | 3 | 0 |
-| `205020` | None | 8 | 0 |
-| `205021` | None | 7 | 0 |
-| `205030` | None | 9 | 0 |
-
-## 3. Deprecated proposal (suspense / clearing, needs your ruling)
+## 2. Clearing accounts (`status=mapped`, `account_role=clearing`, `target_account` = own code)
+Real, single-purpose clearing/suspense accounts. All confirmed `source_usage=live` across the full dataset (postings continue past the current scope, in every company) so each keeps its own code as target rather than being marked `deprecated`.
 
 | gl_account | description | lines | net local |
 |---|---|---|---|
@@ -54,17 +46,38 @@ Draft, not approved. See `docs/missions/01-chart-of-accounts-mapping.md`.
 | `9300` | IC Elimination Suspense | 185 | 373,860 |
 | `199000` | Suspense Clearing | 30 | 435,492 |
 | `199300` | Intercompany Clearing | 218 | 6,690,828 |
-| `199999` | Acc. Dep. — Vehicles | 174 | 5,751,571 |
-| `999999` | Accounts Payable 12 | 78 | 878,756 |
 
-## 4. Classes that split across financial_statement_category (each account is internally consistent; accounts within the same class disagree with each other, needs your ruling)
+## 3. Clearing pairs (`status=unmapped`, `account_role=clearing_pair`, `dq_flag=local_amount_zero_but_dr_cr_nonzero`)
+Debit-only / credit-only pairs. `local_amount` is 0 on every row for all six despite real debit/credit activity below — do not read this set as immaterial from `local_amount` alone. Filed against issue #5. Stay `unmapped` until a human names the real pair target; never map one side without the other.
+
+| gl_account | sum debit | sum credit | lines |
+|---|---|---|---|
+| `115020` | 570,623 | 0 | 4 |
+| `115021` | 1,765,674 | 0 | 10 |
+| `115030` | 465,313 | 0 | 3 |
+| `205020` | 0 | 1,622,855 | 8 |
+| `205021` | 0 | 1,786,440 | 7 |
+| `205030` | 0 | 980,588 | 9 |
+
+## 4. Catch-all accounts (`status=catch_all`, ADR-0005)
+Migration parking codes, not real accounts: many unrelated `account_description` values on the same code, active across all 4 companies and 13 periods in the full source (see ADR-0005). Each keeps its own code as `target_account` and reports on its own line, never merged with the other even though both fall under `account_class` `A.X` — within the current scope they land in different `financial_statement_category` values and folding them together would misclassify one of them. `fs_category_flag` is forced true for both, and both are excluded from section 5's `A.X` vote.
+
+| gl_account | financial_statement_category (in scope) | lines (in scope) | net local (in scope) | distinct descriptions (in scope) |
+|---|---|---|---|---|
+| `199999` | asset | 174 | 5,751,571 | 18 |
+| `999999` | suspense | 78 | 878,756 | 12 |
+
+In-scope figures only. The full-dataset picture is far larger: `199999` carries 180,162,775 net local across 4 companies and 13 periods; `999999` carries 1,736,047. Neither total belongs to the current scope's close.
+
+
+## 5. Classes that split across financial_statement_category (each account is internally consistent; accounts within the same class disagree with each other, needs your ruling; catch-all accounts excluded, see section 4)
 
 | class | name | category | accounts | lines | net local |
 |---|---|---|---|---|---|
 | `A.A` | Cash & Cash Equivalents | asset | 17 | 1,472 | -6,188,671 |
 | `A.A` | Cash & Cash Equivalents | suspense | 1 | 123 | -80,883 |
-| `A.X` | Suspense & Clearing (Asset side) | asset | 3 | 422 | 12,877,891 |
-| `A.X` | Suspense & Clearing (Asset side) | suspense | 4 | 713 | -6,482,776 |
+| `A.X` | Suspense & Clearing (Asset side) | asset | 2 | 248 | 7,126,320 |
+| `A.X` | Suspense & Clearing (Asset side) | suspense | 3 | 635 | -7,361,532 |
 | `L.B` | Accrued Liabilities | asset | 1 | 53 | 185,875 |
 | `L.B` | Accrued Liabilities | liability | 30 | 2,398 | -11,633,668 |
 | `X.A` | Cost of Goods Sold | cogs | 31 | 2,849 | 65,221,047 |

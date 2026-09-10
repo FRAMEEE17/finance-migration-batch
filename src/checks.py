@@ -74,19 +74,59 @@ def map_account_covers_scope(con):
     return scope_accounts == csv_accounts, f"scope={len(scope_accounts)}  csv={len(csv_accounts)}"
 
 
+MAP_ACCOUNT_STATUSES = ("mapped", "unmapped", "deprecated", "catch_all")  # ADR-0005
+
+
 def map_account_status_valid(con):
     rows = _map_rows()
-    bad = [r for r in rows if r["status"] not in ("mapped", "unmapped", "deprecated")]
+    bad = [r for r in rows if r["status"] not in MAP_ACCOUNT_STATUSES]
     return not bad, f"{len(bad)} rows with an invalid status" if bad else "all valid"
 
 
 def map_account_target_consistent_with_status(con):
+    """unmapped rows never carry a target. mapped and catch_all rows always
+    do. deprecated only needs one when source_usage=live (docs/definitions.md)."""
     rows = _map_rows()
-    bad = [
-        r for r in rows
-        if (r["status"] == "unmapped") == bool(r["target_account"])
-    ]
+    bad = []
+    for r in rows:
+        has_target = bool(r["target_account"])
+        if r["status"] == "unmapped" and has_target:
+            bad.append(r)
+        elif r["status"] in ("mapped", "catch_all") and not has_target:
+            bad.append(r)
+        elif r["status"] == "deprecated" and r["source_usage"] == "live" and not has_target:
+            bad.append(r)
     return not bad, f"{len(bad)} rows where target presence disagrees with status" if bad else "consistent"
+
+
+def catch_all_always_flagged(con):
+    """ADR-0005: catch_all accounts are always fs_category_flag=true in
+    dim_account, forced regardless of what the current scope alone shows."""
+    catch_all_accounts = [int(r["source_account"]) for r in _map_rows() if r["status"] == "catch_all"]
+    if not catch_all_accounts:
+        return True, "no catch_all rows yet"
+    placeholders = ",".join(str(a) for a in catch_all_accounts)
+    bad = con.execute(f"""
+        SELECT COUNT(*) FROM dim_account
+        WHERE gl_account IN ({placeholders}) AND fs_category_flag != true
+    """).fetchone()[0]
+    return bad == 0, f"{bad} of {len(catch_all_accounts)} catch_all accounts not flagged"
+
+
+def clearing_pairs_complete(con):
+    """Every clearing_pair row has a pair_id, a partner row with the same
+    pair_id, and both sides share the same status."""
+    rows = [r for r in _map_rows() if r["account_role"] == "clearing_pair"]
+    if not rows:
+        return True, "no clearing_pair rows yet"
+    by_pair: dict[str, list] = {}
+    for r in rows:
+        by_pair.setdefault(r["pair_id"], []).append(r)
+    bad = [
+        pid for pid, members in by_pair.items()
+        if len(members) != 2 or members[0]["status"] != members[1]["status"]
+    ]
+    return not bad, f"{len(bad)} incomplete or status-mismatched pairs" if bad else f"{len(by_pair)} pairs, all complete"
 
 
 def dim_account_row_count(con):
@@ -132,6 +172,8 @@ CHECKS = [
     ("map_account.csv covers scope gl_accounts", map_account_covers_scope),
     ("map_account.csv status is valid", map_account_status_valid),
     ("map_account.csv target/status consistent", map_account_target_consistent_with_status),
+    ("catch_all accounts always flagged", catch_all_always_flagged),
+    ("clearing pairs complete", clearing_pairs_complete),
     ("dim_account row count == distinct gl_account", dim_account_row_count),
     ("gl_account -> account_class is 1:1", gl_account_to_class_is_1to1),
     ("fraud/anomaly accounts not excluded", fraud_anomaly_accounts_not_excluded),

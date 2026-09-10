@@ -193,10 +193,67 @@ No real target chart of accounts exists yet. First pass derives one from the
 source hierarchy at `account_class` grain (~27 rows, rolled up from 505
 `gl_account` values via `account_sub_class → account_class`).
 
-`map_account.csv` columns: `source_account, target_account, status`.
-`status` is one of `mapped`, `unmapped`, `deprecated`. A human approves this
+`map_account.csv` columns: `source_account, target_account, status,
+source_usage, account_role, dq_flag, pair_id, notes`. A human approves this
 file. No target code is invented. `unmapped_account` means a `gl_account`
 not present in `map_account`, or present with `status != mapped`.
+
+**`status`** answers one question only: does this source account have a
+place in the target chart of accounts, and where. It is one of `mapped`,
+`unmapped`, `deprecated`, `catch_all` (see ADR-0005 for `catch_all`).
+It says nothing about whether the account is still receiving postings in
+the source system today. That is a separate question, answered by
+`source_usage`.
+
+- `mapped`: has a `target_account`.
+- `unmapped`: no `target_account` decided yet. Not a claim the account is
+  inactive or safe to drop.
+- `deprecated`: this source code will not be carried into the target CoA.
+  **If `source_usage=live`, a `deprecated` row must still carry a
+  `target_account`** (the account's own source code, not an invented
+  number, not the `account_class`) so live postings have somewhere to land.
+  A `deprecated` row with no `target_account` is only valid when
+  `source_usage != live`.
+- `catch_all`: a migration parking code, not a real account. See ADR-0005.
+
+**`target_account`** is either the source's own `account_class` (the
+default, for an ordinary account rolling up into the ~27-class target CoA),
+or the account's own `source_account` code, when `account_role` is
+`clearing`, `clearing_pair`, or the row's `status` is `catch_all` — these
+represent operational codes that keep their own identity rather than
+rolling into a class. Never a class code (`account_class`) for a
+`catch_all` row: two catch-all codes can carry different
+`financial_statement_category` values in the same scope and folding them
+into one class target would misclassify one of them.
+
+**`source_usage`** is one of `live`, `retired`. Computed over the full
+source data, not the current migration scope: `live` if the account has any
+`debit_amount` or `credit_amount` activity anywhere (any company, any
+period, in or out of scope), or appears in a period after the current
+scope's latest period, or in a company outside the current scope. `retired`
+otherwise. Never computed from `local_amount` alone — see the
+`local_amount_zero_but_dr_cr_nonzero` dq_flag below for why. A third value,
+`dormant`, is deliberately not defined yet: no criteria for it exist, and
+adding it without one would just be a guess wearing a label.
+
+**`account_role`** is optional metadata on what the account does:
+`clearing` (a single clearing/suspense account, one coherent job) or
+`clearing_pair` (one side of a debit-only/credit-only pair that only makes
+sense read together, see `pair_id`). Blank for an ordinary account.
+
+**`dq_flag`** is optional metadata: a named data-quality concern to keep
+visible, not silently drop. `local_amount_zero_but_dr_cr_nonzero` marks a
+`gl_account` where every row's `local_amount` is 0 while `debit_amount` /
+`credit_amount` are materially nonzero — a `local_amount`-only view of
+this account is misleading. Filed against issue #5.
+
+**`pair_id`** links the two sides of a `clearing_pair`: same value on both
+rows (e.g. `115020_205020`). A `clearing_pair` row present without its
+other half, or with the two halves on different `status` values, is a
+validation error, not a valid state.
+
+**`notes`** is free text. Required when a `deprecated` row has no
+`target_account`, to say why.
 
 ## "Close a period" / deliverable / tolerance
 

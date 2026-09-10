@@ -39,25 +39,35 @@
   (company 1000, FY2024 P01-P03), with `account_sub_class`, `account_class`,
   `account_class_name`, `account_description`, and one proposed `fs_category`
   (majority vote per account, flagged where the source disagrees with itself).
-- `map_account.csv` at repo root: `source_account, target_account, status`.
-  Draft. `target_account` = the source's own `account_class` code (derived,
-  not invented). `status` = `mapped` default; `unmapped` for null-class
-  accounts; `deprecated` proposed (not decided) for suspense / clearing.
+- `map_account.csv` at repo root: `source_account, target_account, status,
+  source_usage, account_role, dq_flag, pair_id, notes`. Draft. `target_account`
+  = the source's own `account_class` code for an ordinary rollup account,
+  or the account's own code for a clearing/clearing_pair/catch_all account
+  (derived, not invented, either way). `status` = `mapped` default;
+  `unmapped` for the null-class / clearing-pair accounts; `catch_all` for
+  the two hand-ruled migration parking codes (ADR-0005). `deprecated` ended
+  up unused this round — every suspense/clearing candidate turned out to be
+  either a real live clearing account or a catch-all code, not something
+  actually being retired from the target CoA.
 - Review report (comment on #3 + `docs/mapping-review.md`): the ~27 target
-  groups with line count and net amount; the unmapped list with impact; the
-  dirty-`fs_category` cases; the deprecated proposals.
+  groups, the clearing accounts, the clearing pairs (with a filed dq_flag),
+  the catch-all accounts, and the dirty-`fs_category` classes.
 
 ## Deterministic checks
 
-- [ ] `map_account.csv`: `source_account` is unique (rows == distinct).
-- [ ] Every `gl_account` in scope appears exactly once in `map_account.csv`.
-- [ ] `status` is in {mapped, unmapped, deprecated} for every row.
-- [ ] `mapped` rows have a non-null `target_account`; `unmapped` rows have none.
-- [ ] `dim_account` row count == distinct scope `gl_account`.
-- [ ] `gl_account -> account_class` is 1:1 in scope. If false, "target =
+- [x] `map_account.csv`: `source_account` is unique (rows == distinct).
+- [x] Every `gl_account` in scope appears exactly once in `map_account.csv`.
+- [x] `status` is in {mapped, unmapped, deprecated, catch_all} for every row
+      (catch_all added by ADR-0005 mid-mission).
+- [x] `mapped`/`catch_all` rows have a non-null `target_account`; `unmapped`
+      rows have none; `deprecated` only needs one when `source_usage=live`.
+- [x] `dim_account` row count == distinct scope `gl_account`.
+- [x] `gl_account -> account_class` is 1:1 in scope. If false, "target =
       account_class" is impossible; escalate, do not proceed.
-- [ ] The account set is `SELECT DISTINCT gl_account` unfiltered (no
+- [x] The account set is `SELECT DISTINCT gl_account` unfiltered (no
       `is_fraud` / `is_anomaly` exclusion).
+- [x] `catch_all` accounts are always `fs_category_flag=true` in `dim_account`.
+- [x] Every `clearing_pair` row has a complete, status-matched partner.
 
 ## Non-deterministic checks
 
@@ -95,8 +105,35 @@
 
 **Before the output is used (#4+):**
 
-- you fill the 3 rulings, spot-check the 27 groups, comment "approved" on #3
+- [x] you fill the 3 rulings, spot-check the 27 groups, comment "approved" on #3
+
+The 3 rulings turned out to need a full grilling pass each, not a quick
+yes/no: the 5 "clean" suspense/clearing accounts and the 6 "immaterial"
+unmapped accounts both failed their first-pass read once checked against
+the full dataset (all companies, all periods) instead of just the current
+scope. See Retro.
 
 ## Retro
 
-Filled after the mission closes.
+The one durable rule this mission adds: **a mapping-review report must
+check the full dataset before calling anything immaterial or inactive, not
+just the current scope.** Twice this mission, a scope-limited query gave a
+plausible-looking wrong answer:
+
+- The 5 "clean" suspense/clearing accounts looked dormant enough to
+  `deprecated` from a single description and a coherent name. Checked
+  against the full 4-company, 13-period dataset, all 5 are still live with
+  material balances. `deprecated` almost got attached to real, active
+  accounts.
+- The 6 "immaterial" unmapped accounts showed `local_amount = 0` net and
+  gross. Checked against `debit_amount`/`credit_amount` instead, all six
+  carry real money (millions) as three debit-only/credit-only pairs. The
+  original report's "safe to drop, $0 net" framing was misleading because
+  it only ever looked at one column.
+
+Added to `docs/definitions.md`: `status` (target-CoA disposition) and
+`source_usage` (is the source system still posting to it) are two different
+questions and must never share one column, on pain of exactly the
+`deprecated`-a-live-account mistake above. `catch_all` (ADR-0005) is scoped
+narrowly on purpose — it names the specific pattern of `199999`/`999999`,
+not a general "weird account" bucket.

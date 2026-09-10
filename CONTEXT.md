@@ -89,7 +89,38 @@ _Avoid_: bad data, dirty row (implies "clean by deleting", the opposite of the r
 **Unmapped account**:
 A `gl_account` absent from `map_account.csv`, or present with
 `status != mapped`. A target code for this gap is set by a human in the
-approved mapping file, never assigned automatically.
+approved mapping file, never assigned automatically. `unmapped` says
+nothing about whether the account is still live in the source; see
+Account disposition vs account usage below.
+
+**Account disposition vs account usage**:
+Two different questions about one `gl_account`, kept in two different
+columns of `map_account.csv` on purpose. `status` (`mapped` / `unmapped` /
+`deprecated` / `catch_all`) answers "does this have a place in the target
+chart of accounts." `source_usage` (`live` / `retired`) answers "is the
+source system still posting to it." An account can be `deprecated` and
+`live` at the same time (we are retiring the code, but it is still being
+posted to today, so it needs a target for the live postings to land on).
+Conflating the two into one status value hides exactly that case.
+_Avoid_: reading `deprecated` as "no longer used." It means "not carried
+forward," which is a design decision, not an observation about activity.
+
+**Catch-all account**:
+A `gl_account` that is a migration parking code, not a real business
+account: one code absorbing postings with no real destination, visible as
+many unrelated `account_description` values on the same code, spanning
+companies and periods beyond the current migration scope. `status=catch_all`
+(ADR-0005). Always flagged (`fs_category_flag=true`), never folded into an
+`account_class`'s vote, still keeps a `target_account` (its own code, a
+live account still needs somewhere for postings to land, not a class).
+_Avoid_: "dummy account" (reads as "no real value moves through it," which
+is false here) and treating it as a synonym for `unmapped` or `deprecated`.
+
+**Clearing pair**:
+Two `gl_account` codes that only make sense read together: one posts
+debit-only, the other credit-only, and their amounts move in tandem. Linked
+by `pair_id` in `map_account.csv`. A pair present with only one side
+mapped, or with each side on a different `status`, is a validation error.
 
 **Balance validation vs close totals**:
 Two different checks over the same document, using two different columns.
