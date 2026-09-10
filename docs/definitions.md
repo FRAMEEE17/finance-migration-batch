@@ -195,8 +195,15 @@ source hierarchy at `account_class` grain (~27 rows, rolled up from 505
 
 `map_account.csv` columns: `source_account, target_account, status,
 source_usage, account_role, dq_flag, pair_id, notes`. A human approves this
-file. No target code is invented. `unmapped_account` means a `gl_account`
-not present in `map_account`, or present with `status != mapped`.
+file. No target code is invented.
+
+`unmapped_account` means a `gl_account` not present in `map_account.csv`,
+present with `status='unmapped'`, or present with `status='deprecated'`
+and no `target_account`. It does not mean `status='catch_all'`. A
+catch-all row already has a resolved classification (ADR-0005): flagging
+it the same as an unresolved mapping gap would make a deliberate decision
+look like an open question. A `catch_all` row gets its own non-blocking
+finding, `catch_all_account`, at reconciliation time.
 
 **`status`** answers one question only: does this source account have a
 place in the target chart of accounts, and where. It is one of `mapped`,

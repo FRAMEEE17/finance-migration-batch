@@ -59,7 +59,7 @@ Full definitions, with the book's problem statement and where we differ, are
 in `docs/design-patterns.md`.
 
 | Component | Pattern | Why here |
-|---|---|---|
+| --- | --- | --- |
 | `csv/parquet → stg_gl` | Full Loader | no CDC column, so a full EL copy |
 | period replace, rerun-stable | Data Overwrite + Transactional Writer | delete and re-insert the whole period in one transaction |
 | blocking audits before publish | Audit-Write-Audit-Publish | audits run before anything reaches `fact_gl_line` |
@@ -78,7 +78,7 @@ One DuckDB file, `warehouse.duckdb` (gitignored, rebuilt by the loaders).
 Flat table names in the default `main` schema; the prefix is the layer.
 
 | Table | Layer | Built by |
-|---|---|---|
+| --- | --- | --- |
 | `stg_gl` | staging, raw | `src/load_stg.py` |
 | `dim_account` | core | mapping build |
 | `fact_gl_line` | core | period loader |

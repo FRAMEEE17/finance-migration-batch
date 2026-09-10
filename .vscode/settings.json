@@ -2,12 +2,14 @@
     "cSpell.words": [
         "ADLS",
         "Bartosz",
+        "dedup",
         "Deduplicator",
         "fanout",
         "ILIKE",
         "Konieczny's",
         "mapf",
         "Partitioner",
+        "rollup",
         "vynfi"
     ]
 }
