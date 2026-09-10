@@ -87,11 +87,14 @@ the mismatch report.
 _Avoid_: bad data, dirty row (implies "clean by deleting", the opposite of the rule here)
 
 **Unmapped account**:
-A `gl_account` absent from `map_account.csv`, or present with
-`status != mapped`. A target code for this gap is set by a human in the
-approved mapping file, never assigned automatically. `unmapped` says
-nothing about whether the account is still live in the source; see
-Account disposition vs account usage below.
+A `gl_account` absent from `map_account.csv`, present with
+`status='unmapped'`, or present with `status='deprecated'` and no
+`target_account`. Not the same as `status='catch_all'`, which is a
+resolved classification, not an open gap (see Catch-all account below). A
+target code for this gap is set by a human in the approved mapping file,
+never assigned automatically. `unmapped` says nothing about whether the
+account is still live in the source; see Account disposition vs account
+usage below.
 
 **Account disposition vs account usage**:
 Two different questions about one `gl_account`, kept in two different

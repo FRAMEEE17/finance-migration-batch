@@ -30,6 +30,13 @@
 > its own finding (`local_amount_imbalance`), not a publish blocker."
 > (docs/business-rules.md)
 
+> "`unmapped_account` means a `gl_account` not present in
+> `map_account.csv`, present with `status='unmapped'`, or present with
+> `status='deprecated'` and no `target_account`. It does not mean
+> `status='catch_all'`. A catch-all row already has a resolved
+> classification (ADR-0005)... A `catch_all` row gets its own non-blocking
+> finding, `catch_all_account`." (docs/definitions.md, revised this mission)
+
 > "**Flagged rows (`is_fraud`, `is_anomaly`, `is_post_close`):** these are
 > reconciliation content, never a filter." (docs/business-rules.md, ADR-0003)
 
@@ -49,13 +56,28 @@ before designing the gate:
 | `map_fanout` | yes | 0 |
 | null key column | yes | 0 |
 | `local_amount_imbalance` | no | 23 documents |
-| `unmapped_account` | no | 85 lines (`catch_all` + `unmapped` map_status) |
+| `unmapped_account` | no | 15 lines (literal `status='unmapped'` only) |
+| `catch_all_account` | no | 70 lines (`status='catch_all'`, split out) |
 
 Three of the four blocking checks have nothing real to catch this period
 and need a synthetic-row proof, same pattern as #4's `unmapped_doc_type`
-check. `unmapped_account` counts both `catch_all` and `unmapped` rows,
-per `docs/definitions.md`'s "`status != mapped`" wording, not just literal
-`status=unmapped`.
+check.
+
+`unmapped_account` and `catch_all` got checked together in the first pass
+of this exploration (85 lines combined) and then split apart: a
+`catch_all` row is a resolved classification from ADR-0005, not an
+unresolved mapping gap, so counting it as `unmapped_account` would make a
+decision look like an open question. Fixed in `docs/definitions.md` and
+`CONTEXT.md` before this mission's build started, not left as a build-time
+judgement call.
+
+Also checked and explicitly not built this round: whether a
+`clearing_pair`'s other side is missing from `fact_gl_line`. `115020` has
+zero rows in P01 (real: its activity starts P02), which would fire a
+naive version of this check as a false positive. It isn't a defect, just
+a normal single-period timing gap, so this check needs cross-period
+visibility #5 doesn't have. Left for whichever ticket builds that
+visibility, not invented here to look complete.
 
 ## Desired outcomes
 
@@ -65,8 +87,14 @@ per `docs/definitions.md`'s "`status != mapped`" wording, not just literal
   moves here from `src/load_fact.py`, not duplicated.
 - `dq_violations` table in `warehouse.duckdb`: `check_name, blocking,
   company_code, document_id, line_number, fiscal_year, fiscal_period,
-  detail, checked_at`. One row per finding, blocking and non-blocking
-  alike, replacing `fact_gl_line_rejected`.
+  detail, checked_at`. `check_name` is a closed set in code (not a free
+  string): `unbalanced_document, duplicate_source, map_fanout,
+  null_key_column, local_amount_imbalance, unmapped_account,
+  catch_all_account`. `line_number` is nullable, for a check that
+  operates at document grain (`unbalanced_document`,
+  `local_amount_imbalance`); every other check logs one row per line, the
+  grain it actually checked, never collapsed into one summary row per
+  account. Replaces `fact_gl_line_rejected`.
 - `src/load_fact.py` calls the gate instead of running its own inline
   `unbalanced_document` SQL. Behavior for that one check must not change:
   same document still excluded, same reason.
@@ -86,9 +114,12 @@ per `docs/definitions.md`'s "`status != mapped`" wording, not just literal
 - [ ] All 23 known `local_amount_imbalance` documents appear in
       `dq_violations` with `blocking=false`, and are still present in
       `fact_gl_line` (non-blocking never excludes).
-- [ ] All 85 known `unmapped_account` lines (`catch_all` + `unmapped`
-      `map_status`) appear in `dq_violations` with `blocking=false`, and
-      are still present in `fact_gl_line`.
+- [ ] All 15 known `unmapped_account` lines (literal `status='unmapped'`,
+      the clearing-pair accounts) appear in `dq_violations` with
+      `blocking=false`, still present in `fact_gl_line`.
+- [ ] All 70 known `catch_all_account` lines (`status='catch_all'`) appear
+      in `dq_violations` with `blocking=false`, still present in
+      `fact_gl_line`, and never counted toward `unmapped_account`.
 - [ ] `is_fraud`/`is_anomaly` rows are not filtered anywhere in the gate:
       a fraud/anomaly-flagged row that would otherwise pass still passes,
       one that would otherwise be rejected still gets rejected (flags
@@ -114,6 +145,10 @@ per `docs/definitions.md`'s "`status != mapped`" wording, not just literal
 - Not adding new blocking checks beyond the 4 named in issue #5. A
   `local_amount_imbalance` gap over some threshold, for instance, is not
   becoming a 5th blocking check here without a separate ruling.
+- Not checking whether a `clearing_pair`'s other side is missing from
+  `fact_gl_line`. A real single-period case exists (`115020`, zero rows
+  in P01) but it's a timing fact, not a defect; a correct version of this
+  check needs visibility past one period, which #5 doesn't have.
 
 ## Human approvals
 
@@ -123,18 +158,25 @@ per `docs/definitions.md`'s "`status != mapped`" wording, not just literal
   non-blocking findings together, not two tables
 - `fact_gl_line_rejected` (ticket 4's placeholder) is dropped once
   `dq_violations` replaces it, not kept alongside it
-- `unmapped_account` counts any `map_status != 'mapped'`, including
-  `catch_all`, not just literal `status='unmapped'`
+- `unmapped_account` means literal `status='unmapped'` or
+  `status='deprecated'` with no `target_account`, never `catch_all`.
+  `catch_all` gets its own non-blocking finding, `catch_all_account`.
+  Fixed in `docs/definitions.md`/`CONTEXT.md` ahead of the build.
 - key columns for the null check: `company_code, document_id,
-  line_number, fiscal_year, fiscal_period, gl_account`
+  line_number, fiscal_year, fiscal_period, gl_account`. `target_account`
+  is explicitly not a key column here: a blank target is a mapping gap,
+  not a missing source key.
 - synthetic-row tests for the three checks with no real case this period,
   never touching real `stg_gl` or `map_account.csv` data
+- no check for a `clearing_pair`'s missing other side this round (see
+  Non-goals)
 
 **Before the output is used (#6+):**
 
-- you spot-check the 23 `local_amount_imbalance` documents and the 85
-  `unmapped_account` lines in `dq_violations`, confirm the per-check
-  counts printed after a run look right, comment "approved" on #5
+- you spot-check the 23 `local_amount_imbalance` documents, the 15
+  `unmapped_account` lines, and the 70 `catch_all_account` lines in
+  `dq_violations`, confirm the per-check counts printed after a run look
+  right, comment "approved" on #5
 
 ## Retro
 
