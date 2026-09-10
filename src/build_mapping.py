@@ -90,6 +90,11 @@ def verify_self_consistent(con) -> None:
 
 
 def build_dim_account(con) -> None:
+    """Creates/replaces dim_account: one row per gl_account in scope, with
+    account_class/account_sub_class carried over as-is from stg_gl, plus
+    two computed columns - fs_category_proposed (the financial_statement_category
+    this account posts as most often) and fs_category_flag (true if its
+    lines disagree with each other on that category)."""
     con.execute(f"""
         CREATE OR REPLACE TABLE dim_account AS
         WITH scope AS (
@@ -202,6 +207,9 @@ def draft_map_account(con) -> None:
             status = "mapped"
             target = account_class
 
+        # Column order here must match the header line written just below:
+        # source_account, target_account, status, source_usage,
+        # account_role, dq_flag, pair_id, notes
         written.append((
             gl_account, target, status, usage, role, dq_flag,
             pair_id_of.get(gl_account, ""), notes,
@@ -231,6 +239,8 @@ def draft_map_account(con) -> None:
 
 
 def _query_target_groups(con):
+    """One row per account_class in scope: (class, name, distinct gl_accounts,
+    line count, net local_amount). Feeds report section 1."""
     return con.execute(f"""
         SELECT account_class, account_class_name,
                COUNT(DISTINCT s.gl_account) AS gl_accounts,
@@ -242,6 +252,8 @@ def _query_target_groups(con):
 
 
 def _query_clearing_accounts(con):
+    """One row per CLEARING_ACCOUNTS code: (gl_account, description, line
+    count, net local_amount). Feeds report section 2."""
     accs = ",".join(str(a) for a in CLEARING_ACCOUNTS)
     return con.execute(f"""
         SELECT s.gl_account, MIN(s.account_description),
@@ -252,6 +264,8 @@ def _query_clearing_accounts(con):
 
 
 def _query_clearing_pairs(con):
+    """One row per CLEARING_PAIRS code (both sides of every pair):
+    (gl_account, sum debit, sum credit, line count). Feeds report section 3."""
     accs = ",".join(str(a) for pair in CLEARING_PAIRS for a in pair)
     return con.execute(f"""
         SELECT s.gl_account, ROUND(SUM(s.debit_amount), 0), ROUND(SUM(s.credit_amount), 0), COUNT(*) lines
@@ -261,6 +275,9 @@ def _query_clearing_pairs(con):
 
 
 def _query_catch_all(con):
+    """One row per CATCH_ALL_ACCOUNTS code per financial_statement_category
+    it posts as: (gl_account, category, line count, net local_amount,
+    distinct descriptions). Feeds report section 4."""
     accs = ",".join(str(a) for a in CATCH_ALL_ACCOUNTS)
     return con.execute(f"""
         SELECT s.gl_account, s.financial_statement_category,

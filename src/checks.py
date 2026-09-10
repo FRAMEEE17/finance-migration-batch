@@ -4,6 +4,14 @@
 
 Add one check per acceptance criterion as tickets land. Keep each check
 deterministic: it computes a value and compares it, no judgement.
+
+Every check function shares one contract: takes the DuckDB connection
+`con`, returns `(ok: bool, detail: str)`. `ok` is what main() uses to
+decide pass/fail; `detail` is what gets printed either way, so it should
+say what was actually measured, not just "passed"/"failed". Inside a
+check, `got` is the real value read from the database, `want` is what it
+should be, `bad` is a count of rows/accounts that violate the rule -
+consistent names across every check below, not restated per function.
 """
 
 import csv
