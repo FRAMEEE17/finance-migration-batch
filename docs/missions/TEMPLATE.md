@@ -10,6 +10,12 @@
 Quote the lines from `docs/business-rules.md`, `docs/definitions.md`, or an
 ADR that constrain this mission.
 
+## Exploration
+
+`notebooks/NN-slug.ipynb`, if one exists for this mission. What it checked
+before the mission's checks below were locked, and what it changed about
+the plan (or "none" — didn't need one / nothing it found changed anything).
+
 ## Desired outcomes
 
 - <what exists when this is done, artifact by artifact>
