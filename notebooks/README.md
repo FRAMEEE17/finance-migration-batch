@@ -13,7 +13,7 @@ here first.
 
 Run locally:
 
-```
+```bash
 pip install jupyterlab duckdb
 jupyter lab
 ```
