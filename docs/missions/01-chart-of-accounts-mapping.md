@@ -33,6 +33,16 @@
 > `financial_statement_category` values are likely planted; surface them, do
 > not clean them.
 
+## Exploration
+
+`notebooks/03-chart-of-accounts-mapping.ipynb` has the three decisive
+checks: the 5 "clean" accounts are live across all 4 companies and 13
+periods (not deprecated), the 6 "immaterial" accounts carry real
+debit/credit activity despite a zeroed `local_amount` (not safe to drop),
+and `199999`/`999999` look internally consistent only within the current
+scope, which is why ADR-0005 forces their flag rather than relying on the
+same in-scope check used everywhere else.
+
 ## Desired outcomes
 
 - `dim_account` table in `warehouse.duckdb`: one row per `gl_account` in scope
