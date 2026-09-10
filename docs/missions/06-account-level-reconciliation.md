@@ -79,29 +79,34 @@ mismatch. It's that the close total itself rests on ~$97M of
 ## Desired outcomes
 
 - `recon_period_summary` table in `warehouse.duckdb`: one row per
-  `(gl_account, fiscal_year, fiscal_period)` in scope, with `stg_total`,
-  `fact_total`, `gap` (all on `local_amount`), built straight from
-  `stg_gl` and `fact_gl_line`.
-- A written conclusion (this mission spec's Exploration section,
-  expanded into `docs/mapping-review.md`-style detail in
-  `docs/period-close-notes/2024-01-net-local-amount.md` or similar) that
-  states the H1/H2 finding, the 20 affected documents, and recommends
-  what should happen next, without implementing a fix.
+  `(gl_account, fiscal_year, fiscal_period)` in scope, with the real
+  figures and the known-broken ones in separate columns, not one net
+  number that would just re-display the same 97M distortion this mission
+  exists to explain: `stg_debit_total`, `stg_credit_total`, `dc_gap`,
+  `stg_local_total`, `fact_local_total`, `local_amount_gap`,
+  `imbalanced_doc_count`, `imbalanced_local_amount`,
+  `excluded_unbalanced_doc_count`.
+- `docs/period-close-notes/2024-01-local-amount-defect.md`: the written
+  conclusion, states the H1/H2 finding and the 20 affected documents,
+  scoped for issue #9's report to disclose. No fix implemented.
+- A separate GitHub issue for the source-data root cause, distinct from
+  the ticket that caught the symptom (#5) and the one that found the
+  cause (#6).
 - `docs/definitions.md` / `CONTEXT.md`'s `local_amount_imbalance`
   description corrected: it isn't always rounding.
 
 ## Deterministic checks
 
-- [ ] `recon_period_summary` row count == distinct `(gl_account,
+- [x] `recon_period_summary` row count == distinct `(gl_account,
       fiscal_year, fiscal_period)` combinations in scope across `stg_gl`
       UNION `fact_gl_line`.
-- [ ] `gap = stg_total - fact_total` for every row, computed, not asserted.
-- [ ] Exactly 2 accounts have `ABS(gap) > 0.01`, both attributable to the
+- [x] `gap = stg_total - fact_total` for every row, computed, not asserted.
+- [x] Exactly 2 accounts have `ABS(gap) > 0.01`, both attributable to the
       1 known `unbalanced_document`. Every other account's gap is 0.
-- [ ] The 20 large-magnitude `local_amount_imbalance` documents are named
+- [x] The 20 large-magnitude `local_amount_imbalance` documents are named
       explicitly in the written conclusion, not folded into a single
       "misc" number.
-- [ ] Re-running the build twice gives identical `recon_period_summary`
+- [x] Re-running the build twice gives identical `recon_period_summary`
       contents (same idempotency bar as #4/#5).
 
 ## Non-deterministic checks
@@ -137,10 +142,42 @@ mismatch. It's that the close total itself rests on ~$97M of
 
 **Before the output is used (#7+):**
 
-- you rule on what happens to the ~$97M finding (see Non-deterministic
-  checks), spot-check `recon_period_summary`'s 2 non-zero accounts,
+- you spot-check `recon_period_summary`'s 2 non-zero accounts and the
+  `docs/period-close-notes/2024-01-local-amount-defect.md` wording,
   comment "approved" on #6
+
+## Ruling on the ~$97M finding
+
+Decided, not left open:
+
+- proceed with #6 without waiting for #5's approval, since the gates #6
+  depends on (`unbalanced_document` exclusion, `local_amount_imbalance`
+  logging, `dq_violations` itself) were already in the code. #6 doesn't
+  fix `local_amount`, it proves the gap isn't between `stg_gl` and
+  `fact_gl_line`. Only exception: if #5's check names or
+  `unmapped_account` definition were still moving, lock the names #6
+  reads before comparing row counts. They weren't moving (#5 closed
+  before this ruling), so this didn't end up mattering.
+- both at once, not one or the other: recorded as a known issue for #9's
+  report (`docs/period-close-notes/2024-01-local-amount-defect.md`), and
+  filed as a separate source-data ticket, issue #13, distinct from #5.
+  #6 does not become the ticket that fixes the source.
+- no transform in #6 redistributes the broadcast total back across the
+  36 debit lines, even though the arithmetic to do so is straightforward.
+  A quiet fix here would make the `stg`/`fact` comparison look clean with
+  no record of why.
 
 ## Retro
 
-Filled after the mission closes.
+The account-level reconciliation itself needed almost no judgement calls;
+the investigation issue #6 asked for was the real content of this
+mission, and the mission-object process handled that fine without
+changes. The one procedural lesson: this mission's Non-goals originally
+treated "what to do about the finding" as a single open question for the
+human to rule on later. It arrived as three separate rulings in one
+message instead (proceed without waiting for #5, ship the fuller
+schema, escalate to two places, not one) - the template's single-cell
+"Non-deterministic checks" row undersold how many small decisions a real
+finding produces. No change to the template over this alone; worth
+watching whether it recurs on #7/#8.
+

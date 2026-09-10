@@ -134,8 +134,13 @@ its own question.
 
 **local_amount_imbalance**:
 A finding on a document that balances on `debit_amount − credit_amount` but
-whose `local_amount` does not net to zero (currency-conversion rounding).
-Reported, never a publish blocker.
+whose `local_amount` does not net to zero. Reported, never a publish
+blocker. Cause varies by magnitude, not always rounding: a gap of a few
+cents is currency-conversion rounding, but a gap in the thousands or
+millions has shown up from a source-data defect (a document-level total
+broadcast onto every line instead of a real per-line amount, see
+`docs/period-close-notes/2024-01-local-amount-defect.md`). Check the size
+of the gap before assuming which one it is.
 
 **Closed period**:
 A period whose `reports/period_YYYY-PP.md` a human has accepted. It is not a

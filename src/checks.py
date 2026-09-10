@@ -23,6 +23,7 @@ import duckdb  # type: ignore
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import load_fact  # noqa: E402
 import quality_gate  # noqa: E402
+import reconcile_account  # noqa: E402
 
 from config import REPO_ROOT, SOURCE_PARQUET, WAREHOUSE_DB
 
@@ -360,7 +361,53 @@ def gate_never_filters_on_flags(con):
     return not bad, "quality_gate.py never references is_fraud/is_anomaly" if not bad else "found a reference, review it"
 
 
-# --- Ticket 6+: reconciliation --------------------------------------------
+# --- Ticket 6: account-level reconciliation --------------------------------
+
+def recon_period_summary_row_count(con):
+    got = con.execute("SELECT COUNT(*) FROM recon_period_summary").fetchone()[0]
+    want = con.execute(f"""
+        SELECT COUNT(*) FROM (
+            SELECT gl_account FROM stg_gl WHERE {load_fact.PERIOD_FILTER}
+            UNION
+            SELECT gl_account FROM fact_gl_line
+        )
+    """).fetchone()[0]
+    return got == want, f"recon_period_summary={got}  distinct gl_account (stg UNION fact)={want}"
+
+
+def recon_gaps_computed_correctly(con):
+    """dc_gap and local_amount_gap aren't just copied in, they equal what
+    their own columns say (stg_debit_total - stg_credit_total, and
+    stg_local_total - fact_local_total)."""
+    bad = con.execute("""
+        SELECT COUNT(*) FROM recon_period_summary
+        WHERE ROUND(stg_debit_total - stg_credit_total, 2) != dc_gap
+           OR ROUND(stg_local_total - fact_local_total, 2) != local_amount_gap
+    """).fetchone()[0]
+    return bad == 0, f"{bad} rows where a gap column disagrees with its own inputs"
+
+
+def recon_local_amount_gap_isolated_to_two_accounts(con):
+    """Mission 06: only the 2 accounts touched by the 1 known
+    unbalanced_document should show a real stg-vs-fact local_amount gap.
+    Everywhere else, fact_gl_line inherits the same (defective)
+    local_amount values stg_gl has, so the gap is exactly 0."""
+    bad = con.execute("""
+        SELECT COUNT(*) FROM recon_period_summary WHERE ABS(local_amount_gap) > 0.01
+    """).fetchone()[0]
+    return bad == 2, f"{bad} accounts with a real local_amount gap (want 2)"
+
+
+def recon_imbalanced_total_matches_known_finding(con):
+    """The 20-document local_amount defect mission 06 found (97,144,587.1
+    total) must be fully attributed across recon_period_summary's
+    imbalanced_local_amount column, not partially lost in the join."""
+    got = con.execute("SELECT ROUND(SUM(imbalanced_local_amount), 1) FROM recon_period_summary").fetchone()[0]
+    want = 97144587.1
+    return abs(got - want) < 0.5, f"sum(imbalanced_local_amount)={got}  want={want}"
+
+
+# --- Ticket 7+: reversal pairs, reconciliation ------------------------------
 
 
 CHECKS = [
@@ -392,6 +439,10 @@ CHECKS = [
     ("local_amount_imbalance logged, not excluded", local_amount_imbalance_logged_not_excluded),
     ("unmapped_account excludes catch_all", unmapped_account_excludes_catch_all),
     ("gate never filters on is_fraud/is_anomaly", gate_never_filters_on_flags),
+    ("recon_period_summary row count", recon_period_summary_row_count),
+    ("recon gaps computed correctly", recon_gaps_computed_correctly),
+    ("local_amount gap isolated to 2 accounts", recon_local_amount_gap_isolated_to_two_accounts),
+    ("imbalanced total matches known finding", recon_imbalanced_total_matches_known_finding),
 ]
 
 
