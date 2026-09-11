@@ -25,6 +25,7 @@ import load_fact  # noqa: E402
 import quality_gate  # noqa: E402
 import reconcile_account  # noqa: E402
 import reconcile_reversals  # noqa: E402
+import reconcile_mismatch  # noqa: E402
 
 from config import REPO_ROOT, SOURCE_PARQUET, WAREHOUSE_DB
 
@@ -493,7 +494,140 @@ def reversal_synthetic_duplicate_and_self_reversal_reject(con):
     return ok, f"duplicate collapses to {dup_collapsed} row (want 1), self-reversal detected {self_reversal_rejected} time(s) (want 1, to be excluded upstream)"
 
 
-# --- Ticket 8+: document-level reconciliation --------------------------------
+# --- Ticket 8: document-level reconciliation with bucket + cause -----------
+
+VALID_BUCKETS = ("missing_in_fact", "missing_in_stg", "amount_changed", "intentionally_excluded")
+VALID_CAUSES = (
+    "opening_balance", "closing_entry", "post_close", "unmapped_account",
+    "unmapped_doc_type", "unbalanced_document", "duplicate_source",
+    "reversal_pair", "out_of_scope_period", "local_amount_imbalance",
+    "rounding", "unknown",
+)
+INTENTIONALLY_EXCLUDED_CAUSES = (
+    "opening_balance", "closing_entry", "post_close", "out_of_scope_period", "reversal_pair",
+)
+
+
+def mismatch_bucket_cause_enums_valid(con):
+    bad = con.execute(f"""
+        SELECT COUNT(*) FROM recon_mismatch
+        WHERE bucket NOT IN ({",".join(f"'{b}'" for b in VALID_BUCKETS)})
+           OR cause NOT IN ({",".join(f"'{c}'" for c in VALID_CAUSES)})
+    """).fetchone()[0]
+    return bad == 0, f"{bad} rows with a bucket or cause outside the closed enums"
+
+
+def mismatch_intentionally_excluded_cause_restricted(con):
+    bad = con.execute(f"""
+        SELECT COUNT(*) FROM recon_mismatch
+        WHERE bucket = 'intentionally_excluded'
+          AND cause NOT IN ({",".join(f"'{c}'" for c in INTENTIONALLY_EXCLUDED_CAUSES)})
+    """).fetchone()[0]
+    return bad == 0, f"{bad} intentionally_excluded rows with a cause outside the allowed 5"
+
+
+def mismatch_known_counts(con):
+    got = con.execute("""
+        SELECT bucket, cause, COUNT(*) FROM recon_mismatch GROUP BY 1, 2 ORDER BY 1, 2
+    """).fetchall()
+    want = [
+        ("intentionally_excluded", "opening_balance", 17),
+        ("intentionally_excluded", "post_close", 200),
+        ("missing_in_fact", "unbalanced_document", 2),
+    ]
+    return got == want, f"got={got}" if got != want else "17 opening_balance, 200 post_close, 2 unbalanced_document, exact"
+
+
+def mismatch_unknown_under_twenty_percent(con):
+    total, unknown = con.execute("""
+        SELECT COUNT(*), SUM((cause = 'unknown')::int) FROM recon_mismatch
+    """).fetchone()
+    pct = 100.0 * unknown / total if total else 0.0
+    return pct < 20.0, f"unknown={unknown}/{total} ({pct:.1f}%, want <20%)"
+
+
+def mismatch_gap_computed_not_asserted(con):
+    """gap = stg local_amount - fact local_amount, recomputed independently
+    here from stg_gl / fact_gl_line, not read back from recon_mismatch's
+    own column. Against the close-eligible subset, matching what
+    build_recon_mismatch itself compares (a row flagged
+    is_opening_balance/is_closing_entry/is_post_close counts as absent
+    from the close-eligible side, even though it's present in the full
+    fact_gl_line table - that's the whole reason it's a mismatch)."""
+    bad = con.execute("""
+        SELECT COUNT(*) FROM recon_mismatch m
+        JOIN stg_gl s USING (company_code, document_id, line_number, fiscal_year, fiscal_period)
+        LEFT JOIN (
+            SELECT * FROM fact_gl_line
+            WHERE NOT is_opening_balance AND NOT is_closing_entry AND NOT is_post_close
+        ) f USING (company_code, document_id, line_number, fiscal_year, fiscal_period)
+        WHERE m.gap != ROUND(s.local_amount - COALESCE(f.local_amount, 0), 2)
+    """).fetchone()[0]
+    return bad == 0, f"{bad} rows where recon_mismatch.gap disagrees with a fresh close-eligible computation"
+
+
+def mismatch_closing_entry_synthetic(con):
+    """No real CL document exists in P01 (mission 04/08's Exploration) -
+    prove the closing_entry cause path fires correctly with a synthetic
+    row, mirroring build_recon_mismatch's own CASE expression. Never
+    touches stg_gl or fact_gl_line."""
+    got = con.execute("""
+        SELECT CASE
+            WHEN NOT in_fact_close_eligible AND is_opening_balance THEN 'opening_balance'
+            WHEN NOT in_fact_close_eligible AND is_closing_entry THEN 'closing_entry'
+            WHEN NOT in_fact_close_eligible AND is_post_close THEN 'post_close'
+        END
+        FROM (VALUES (false, false, true, false)) AS t(in_fact_close_eligible, is_opening_balance, is_closing_entry, is_post_close)
+    """).fetchone()[0]
+    return got == "closing_entry", f"synthetic closing_entry row classified as {got!r} (want 'closing_entry')"
+
+
+def mismatch_amount_changed_and_missing_in_stg_synthetic(con):
+    """Neither amount_changed nor missing_in_stg has a real case in P01
+    (every row that's present on both sides matches exactly, and
+    fact_gl_line is built as a strict subset of stg_gl so nothing can be
+    in fact without being in stg). Proves both bucket branches of
+    build_recon_mismatch's own CASE expression with synthetic in/absent
+    flags and a deliberately large gap. Never touches stg_gl or
+    fact_gl_line."""
+    rows = con.execute("""
+        SELECT label, CASE
+            WHEN NOT in_stg THEN 'missing_in_stg'
+            WHEN NOT in_fact_full THEN 'missing_in_fact'
+            WHEN NOT in_fact_close_eligible THEN 'intentionally_excluded'
+            WHEN ABS(gap) > 0.01 THEN 'amount_changed'
+            ELSE 'matched'
+        END AS bucket
+        FROM (VALUES
+            (false, true, true, 0.0, 'missing_in_stg_case'),
+            (true, true, true, 50.0, 'amount_changed_case')
+        ) AS t(in_stg, in_fact_full, in_fact_close_eligible, gap, label)
+    """).fetchall()
+    got = dict(rows)
+    want = {"missing_in_stg_case": "missing_in_stg", "amount_changed_case": "amount_changed"}
+    return got == want, f"got={got}" if got != want else "both synthetic cases classify correctly"
+
+
+def mismatch_pair_enrichment_present(con):
+    """recon_reversal_pairs enrichment (pair_id, is_swap_valid) attaches
+    to a recon_mismatch row whose document is part of a detected pair,
+    per mission 08's ruling: informational only, never changes bucket or
+    cause. At least one real row should show it (92 found when this was
+    built) - if this ever drops to 0, the enrichment join broke, not
+    that no mismatched row happens to be part of a pair."""
+    got = con.execute("SELECT COUNT(*) FROM recon_mismatch WHERE pair_id IS NOT NULL").fetchone()[0]
+    return got > 0, f"{got} recon_mismatch rows carry a non-null pair_id (want >0)"
+
+
+def mismatch_pair_enrichment_never_changes_bucket(con):
+    """Being part of a reversal pair never reclassifies a row's bucket or
+    cause away from what the close-eligible comparison alone determined
+    (mission 08: option (a), not (b))."""
+    bad = con.execute(f"""
+        SELECT COUNT(*) FROM recon_mismatch
+        WHERE pair_id IS NOT NULL AND (bucket = 'reversal_pair' OR cause = 'reversal_pair')
+    """).fetchone()[0]
+    return bad == 0, f"{bad} rows where pair membership leaked into bucket/cause"
 
 
 CHECKS = [
@@ -535,6 +669,15 @@ CHECKS = [
     ("reversal is_net_zero matches known split", reversal_is_net_zero_matches_known_split),
     ("reversal synthetic net-zero cases", reversal_synthetic_net_zero_cases),
     ("reversal synthetic duplicate/self-reversal reject", reversal_synthetic_duplicate_and_self_reversal_reject),
+    ("mismatch bucket/cause enums valid", mismatch_bucket_cause_enums_valid),
+    ("mismatch intentionally_excluded cause restricted", mismatch_intentionally_excluded_cause_restricted),
+    ("mismatch known counts", mismatch_known_counts),
+    ("mismatch unknown under 20%", mismatch_unknown_under_twenty_percent),
+    ("mismatch gap computed, not asserted", mismatch_gap_computed_not_asserted),
+    ("mismatch closing_entry synthetic case", mismatch_closing_entry_synthetic),
+    ("mismatch amount_changed/missing_in_stg synthetic", mismatch_amount_changed_and_missing_in_stg_synthetic),
+    ("mismatch pair enrichment present", mismatch_pair_enrichment_present),
+    ("mismatch pair enrichment never changes bucket", mismatch_pair_enrichment_never_changes_bucket),
 ]
 
 

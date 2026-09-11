@@ -99,27 +99,27 @@ data. See Human approvals.
 
 ## Deterministic checks
 
-- [ ] Every `recon_mismatch` row's `bucket` is one of the 4 listed
+- [x] Every `recon_mismatch` row's `bucket` is one of the 4 listed
       values; every `cause` is one of the enum's ~13 values.
-- [ ] `bucket=intentionally_excluded` rows only ever carry
+- [x] `bucket=intentionally_excluded` rows only ever carry
       `cause IN (opening_balance, closing_entry, post_close,
       out_of_scope_period, reversal_pair)`, never anything else
       (docs/definitions.md's pairing rule).
-- [ ] The 2 known `missing_in_fact`/`unbalanced_document` rows and the
+- [x] The 2 known `missing_in_fact`/`unbalanced_document` rows and the
       217 known `intentionally_excluded` rows (17 `opening_balance`, 200
       `post_close`) appear exactly, not approximately.
-- [ ] `unknown` is 0% for this period (matches the exploration; nothing
+- [x] `unknown` is 0% for this period (matches the exploration; nothing
       unexplained).
-- [ ] `gap` for every row is computed from `stg_local_amount -
+- [x] `gap` for every row is computed from `stg_local_amount -
       fact_local_amount`, never asserted, and uses `ABS(gap) > 0.01`
       wherever it gates a bucket decision, never `=` on floats.
-- [ ] A synthetic row proves the `closing_entry` cause path fires
+- [x] A synthetic row proves the `closing_entry` cause path fires
       correctly, since no real `CL` document exists in P01 to test
       against.
-- [ ] Whatever `reversal_pair` trigger condition gets approved (see
+- [x] Whatever `reversal_pair` trigger condition gets approved (see
       Human approvals) has both a real-data check if one exists, and a
       synthetic-row proof regardless.
-- [ ] Re-running the build twice gives an identical `recon_mismatch` table.
+- [x] Re-running the build twice gives an identical `recon_mismatch` table.
 
 ## Non-deterministic checks
 
@@ -151,27 +151,51 @@ data. See Human approvals.
   confirm against, but the mechanism already exists in `fact_gl_line`
   (mission 04 built the flag, just never had a `CL` document to set it
   on). Low-risk to approve on the parallel alone.
-- **`reversal_pair`**: no parallel mechanism exists. Two candidate
-  designs, needs a choice before any code:
-  1. Never fires within a single period's `recon_mismatch`. A reversal
-     pair explains a *cross-period* pattern (mission 07: 326 pairs cross
-     a period boundary), which is a #9/#10 concern once more than one
-     period is in scope, not a same-period stg-vs-fact difference. Build
-     nothing for it now beyond the enum already allowing it; revisit
-     when #10 backfills P02/P03.
-  2. A row whose document is part of a detected reversal pair
-     (`recon_reversal_pairs`, either side) gets reclassified from
-     "matched" to `bucket=intentionally_excluded, cause=reversal_pair`
-     even when `stg_gl` and `fact_gl_line` agree exactly, so a reader of
-     `recon_mismatch` sees *why* a large-looking transaction is there
-     (it's half of a pair) instead of it looking like ordinary,
-     unexplained activity.
+- **`reversal_pair`**: decided against reclassification. `recon_mismatch`
+  answers why a row doesn't compare equal in the close-eligible set, not
+  what a transaction means economically. A reversal pair whose `stg_gl`
+  and `fact_gl_line` agree is `matched`, full stop - reclassifying it to
+  `intentionally_excluded` would pull real, in-period activity out of
+  `matched` and conflate it with the unrelated `post_close` bucket. The
+  326 cross-period pairs get explained in `recon_reversal_pairs` and
+  eventually #9's report, not invented as a same-period mismatch cause
+  here. `recon_mismatch` still carries `pair_id`/`is_swap_valid` as
+  nullable, informational attributes on any row that happens to also be
+  part of a pair, without those columns touching bucket or cause. A real
+  `intentionally_excluded`/`reversal_pair` bucket entry, for a leg that's
+  genuinely cut from the close-eligible set once #10 loads P02/P03, is
+  deferred, not built speculatively now.
 
 **Before the output is used (#9+):**
 
-- you rule on `reversal_pair`'s design (above), spot-check the 219 known
-  `intentionally_excluded`/`missing_in_fact` rows, comment "approved" on #8
+- you spot-check the 219 known `intentionally_excluded`/`missing_in_fact`
+  rows and the 92 rows carrying `pair_id`, comment "approved" on #8
 
 ## Retro
 
-Filled after the mission closes.
+The literal reading of issue #8's instruction ("FULL OUTER JOIN stg_gl to
+fact_gl_line") would have shipped a `recon_mismatch` with one working
+bucket out of four, permanently, not just this period. Caught by running
+the join literally in the exploration notebook before writing any
+production code, not by re-reading the issue text more carefully - the
+text alone doesn't say which `fact_gl_line` (the full table or the
+close-eligible subset), and both readings compile and run without error.
+A query that runs cleanly is not the same as a query that means what the
+ticket asked for.
+
+The `reversal_pair` decision (don't reclassify, attribute instead) is the
+same principle from #6/#7 applied again: don't let a finding that's true
+of a *document* leak into a column that's supposed to answer a narrower
+question about a *row's presence in a table*. `is_swap_valid` and
+`pair_id` carry the "this document is part of a reversal" fact without
+overloading `bucket`/`cause` to carry it too.
+
+Durable rule this adds, worth a line in `docs/definitions.md` if #9
+raises the same question again: **an attribute that's true about a
+document (part of a pair, flagged fraud/anomaly) stays a separate,
+nullable column - it doesn't get folded into an enum that's already
+carrying a different, narrower meaning.**
+
+Verified: two consecutive runs of `src/reconcile_mismatch.py` produced
+identical `recon_mismatch` (219 rows, same bucket/cause counts, 92 rows
+with `pair_id`). 47/47 regression checks green.
