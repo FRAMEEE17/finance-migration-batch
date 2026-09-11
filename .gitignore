@@ -28,3 +28,4 @@ AGENTS.md
 *.duckdb
 src/__pycache__/
 HARNESS_TO_AGENTS.md
+.DS_Store

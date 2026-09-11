@@ -33,6 +33,9 @@ from config import REPO_ROOT, SOURCE_PARQUET, WAREHOUSE_DB
 SOURCE = str(SOURCE_PARQUET)
 MAP_CSV = REPO_ROOT / "map_account.csv"
 SCOPE = "company_code = 1000 AND fiscal_year = 2024 AND fiscal_period IN (1,2,3)"
+P01_FILTER = "company_code = 1000 AND fiscal_year = 2024 AND fiscal_period = 1"
+BACKFILL_PERIODS = [(1000, 2024, 1), (1000, 2024, 2), (1000, 2024, 3)]
+P01_FACT_ANCHOR = (13140, 3517, 97144587.13)  # rows, distinct documents, SUM(local_amount)
 
 
 def _tables(con: duckdb.DuckDBPyConnection) -> set[str]:
@@ -178,25 +181,29 @@ def fraud_anomaly_accounts_not_excluded(con):
 # --- Ticket 4: idempotent loader ----------------------------------------
 
 def fact_gl_line_scope_only(con):
+    """fact_gl_line no longer means "just P01" (ticket 10 parameterized
+    the loader) - scope is now company 1000 / FY2024, periods 1 through 3."""
     bad = con.execute(f"""
-        SELECT COUNT(*) FROM fact_gl_line WHERE NOT ({load_fact.PERIOD_FILTER})
+        SELECT COUNT(*) FROM fact_gl_line WHERE NOT ({SCOPE})
     """).fetchone()[0]
-    return bad == 0, f"{bad} rows outside company 1000 / 2024-01" if bad else "scope only"
+    return bad == 0, f"{bad} rows outside company 1000 / 2024, periods 1-3" if bad else "scope only"
 
 
 def fact_gl_line_subset_of_stg(con):
     fact_rows = con.execute("SELECT COUNT(*) FROM fact_gl_line").fetchone()[0]
-    stg_rows = con.execute(f"SELECT COUNT(*) FROM stg_gl WHERE {load_fact.PERIOD_FILTER}").fetchone()[0]
+    stg_rows = con.execute(f"SELECT COUNT(*) FROM stg_gl WHERE {SCOPE}").fetchone()[0]
     return fact_rows <= stg_rows, f"fact={fact_rows:,}  stg (same scope)={stg_rows:,}"
 
 
 def unbalanced_document_excluded(con):
     """The whole document is gone from fact_gl_line, not just its
-    imbalanced line, and shows up in dq_violations instead."""
+    imbalanced line, and shows up in dq_violations instead. Scoped to
+    P01 - the one known unbalanced document; P02/P03's ticket 10 backfill
+    loaded zero (see the period reports' "0 document(s) excluded")."""
     still_present = con.execute(f"""
         SELECT COUNT(*) FROM fact_gl_line f
         JOIN (
-            SELECT document_id FROM stg_gl WHERE {load_fact.PERIOD_FILTER}
+            SELECT document_id FROM stg_gl WHERE {P01_FILTER}
             GROUP BY 1 HAVING ROUND(SUM(debit_amount) - SUM(credit_amount), 2) != 0
         ) u ON u.document_id = f.document_id
     """).fetchone()[0]
@@ -210,13 +217,14 @@ def unbalanced_document_excluded(con):
 
 def opening_balance_flagged_not_excluded(con):
     """OPENING_BALANCE rows stay in fact_gl_line, flagged, not dropped -
-    different rule from unbalanced_document (docs/business-rules.md)."""
+    different rule from unbalanced_document (docs/business-rules.md).
+    Scope spans all three backfilled periods (ticket 10)."""
     got = con.execute("""
         SELECT COUNT(*) FROM fact_gl_line WHERE is_opening_balance
     """).fetchone()[0]
     want = con.execute(f"""
         SELECT COUNT(*) FROM stg_gl
-        WHERE {load_fact.PERIOD_FILTER} AND document_type = '{load_fact.OPENING_BALANCE_TYPE}'
+        WHERE {SCOPE} AND document_type = '{load_fact.OPENING_BALANCE_TYPE}'
     """).fetchone()[0]
     return got == want, f"flagged in fact={got}  in stg (same scope)={want}"
 
@@ -313,16 +321,17 @@ def null_key_column_synthetic_reject(con):
 
 
 def local_amount_imbalance_logged_not_excluded(con):
-    """All 23 known local_amount_imbalance documents are logged
+    """All 23 known local_amount_imbalance documents in P01 are logged
     non-blocking and still present in fact_gl_line (non-blocking never
-    excludes)."""
-    logged = con.execute("""
+    excludes). P01-specific count (P02 has 30, P03 has 40, both checked
+    by dq_violations_present_every_period instead of an exact anchor)."""
+    logged = con.execute(f"""
         SELECT COUNT(*) FROM dq_violations
-        WHERE check_name = 'local_amount_imbalance' AND blocking = false
+        WHERE check_name = 'local_amount_imbalance' AND blocking = false AND {P01_FILTER}
     """).fetchone()[0]
-    missing_from_fact = con.execute("""
+    missing_from_fact = con.execute(f"""
         SELECT COUNT(*) FROM dq_violations v
-        WHERE v.check_name = 'local_amount_imbalance'
+        WHERE v.check_name = 'local_amount_imbalance' AND {P01_FILTER}
           AND NOT EXISTS (
               SELECT 1 FROM fact_gl_line f
               WHERE f.company_code = v.company_code AND f.document_id = v.document_id
@@ -336,18 +345,20 @@ def local_amount_imbalance_logged_not_excluded(con):
 def unmapped_account_excludes_catch_all(con):
     """unmapped_account (15 lines) and catch_all_account (70 lines) never
     overlap and never exclude a row from fact_gl_line - both non-blocking,
-    docs/definitions.md's post-mission-05 wording."""
-    unmapped = con.execute("""
-        SELECT COUNT(*) FROM dq_violations WHERE check_name = 'unmapped_account' AND blocking = false
+    docs/definitions.md's post-mission-05 wording. P01-specific counts
+    (P02 is 12/91, P03 is 14/91 - different mixes of the same scope-wide
+    map_account.csv, checked by dq_violations_present_every_period)."""
+    unmapped = con.execute(f"""
+        SELECT COUNT(*) FROM dq_violations WHERE check_name = 'unmapped_account' AND blocking = false AND {P01_FILTER}
     """).fetchone()[0]
-    catch_all = con.execute("""
-        SELECT COUNT(*) FROM dq_violations WHERE check_name = 'catch_all_account' AND blocking = false
+    catch_all = con.execute(f"""
+        SELECT COUNT(*) FROM dq_violations WHERE check_name = 'catch_all_account' AND blocking = false AND {P01_FILTER}
     """).fetchone()[0]
-    overlap = con.execute("""
+    overlap = con.execute(f"""
         SELECT COUNT(*) FROM (
-            SELECT document_id, line_number, fiscal_year, fiscal_period FROM dq_violations WHERE check_name = 'unmapped_account'
+            SELECT document_id, line_number, fiscal_year, fiscal_period FROM dq_violations WHERE check_name = 'unmapped_account' AND {P01_FILTER}
             INTERSECT
-            SELECT document_id, line_number, fiscal_year, fiscal_period FROM dq_violations WHERE check_name = 'catch_all_account'
+            SELECT document_id, line_number, fiscal_year, fiscal_period FROM dq_violations WHERE check_name = 'catch_all_account' AND {P01_FILTER}
         )
     """).fetchone()[0]
     ok = unmapped == 15 and catch_all == 70 and overlap == 0
@@ -367,15 +378,18 @@ def gate_never_filters_on_flags(con):
 # --- Ticket 6: account-level reconciliation --------------------------------
 
 def recon_period_summary_row_count(con):
+    """recon_period_summary is one row per (gl_account, fiscal_year,
+    fiscal_period), not per account alone - the same account appears up
+    to 3 times now that P01-P03 are all loaded (ticket 10)."""
     got = con.execute("SELECT COUNT(*) FROM recon_period_summary").fetchone()[0]
     want = con.execute(f"""
         SELECT COUNT(*) FROM (
-            SELECT gl_account FROM stg_gl WHERE {load_fact.PERIOD_FILTER}
+            SELECT gl_account, fiscal_year, fiscal_period FROM stg_gl WHERE {SCOPE}
             UNION
-            SELECT gl_account FROM fact_gl_line
+            SELECT gl_account, fiscal_year, fiscal_period FROM fact_gl_line
         )
     """).fetchone()[0]
-    return got == want, f"recon_period_summary={got}  distinct gl_account (stg UNION fact)={want}"
+    return got == want, f"recon_period_summary={got}  distinct (gl_account, period) (stg UNION fact)={want}"
 
 
 def recon_gaps_computed_correctly(con):
@@ -402,12 +416,19 @@ def recon_local_amount_gap_isolated_to_two_accounts(con):
 
 
 def recon_imbalanced_total_matches_known_finding(con):
-    """The 20-document local_amount defect mission 06 found (97,144,587.1
-    total) must be fully attributed across recon_period_summary's
-    imbalanced_local_amount column, not partially lost in the join."""
-    got = con.execute("SELECT ROUND(SUM(imbalanced_local_amount), 1) FROM recon_period_summary").fetchone()[0]
+    """The 20-document local_amount defect mission 06 found in P01
+    (97,144,587.1 total) must be fully attributed across
+    recon_period_summary's imbalanced_local_amount column for that
+    period, not partially lost in the join. That column sums every
+    local_amount_imbalance-flagged document (23 in P01, including 3
+    sub-cent rounding cases the report's own materiality filter drops),
+    so the gap between 20 and 23 documents stays inside the 0.5
+    tolerance below rather than needing its own reconciliation."""
+    got = con.execute(f"""
+        SELECT ROUND(SUM(imbalanced_local_amount), 1) FROM recon_period_summary WHERE {P01_FILTER}
+    """).fetchone()[0]
     want = 97144587.1
-    return abs(got - want) < 0.5, f"sum(imbalanced_local_amount)={got}  want={want}"
+    return abs(got - want) < 0.5, f"sum(imbalanced_local_amount) P01={got}  want={want}"
 
 
 # --- Ticket 7: reversal-pair detection --------------------------------------
@@ -528,15 +549,19 @@ def mismatch_intentionally_excluded_cause_restricted(con):
 
 
 def mismatch_known_counts(con):
-    got = con.execute("""
-        SELECT bucket, cause, COUNT(*) FROM recon_mismatch GROUP BY 1, 2 ORDER BY 1, 2
+    """P01-specific exact counts, pinned since mission 08. P02/P03 add
+    their own post_close-only rows (62 and 101, see
+    recon_tables_hold_all_three_periods) that would otherwise inflate an
+    unscoped comparison against this fixed list."""
+    got = con.execute(f"""
+        SELECT bucket, cause, COUNT(*) FROM recon_mismatch WHERE {P01_FILTER} GROUP BY 1, 2 ORDER BY 1, 2
     """).fetchall()
     want = [
         ("intentionally_excluded", "opening_balance", 17),
         ("intentionally_excluded", "post_close", 200),
         ("missing_in_fact", "unbalanced_document", 2),
     ]
-    return got == want, f"got={got}" if got != want else "17 opening_balance, 200 post_close, 2 unbalanced_document, exact"
+    return got == want, f"got={got}" if got != want else "P01: 17 opening_balance, 200 post_close, 2 unbalanced_document, exact"
 
 
 def mismatch_unknown_under_twenty_percent(con):
@@ -634,70 +659,128 @@ def mismatch_pair_enrichment_never_changes_bucket(con):
 # --- Ticket 9: period report for finance sign-off ---------------------------
 
 def period_report_exists(con):
-    return build_period_report.REPORT_MD.exists(), f"{build_period_report.REPORT_MD}"
+    missing = [
+        build_period_report.report_path(y, p)
+        for _, y, p in BACKFILL_PERIODS
+        if not build_period_report.report_path(y, p).exists()
+    ]
+    return not missing, "all 3 period reports exist" if not missing else f"missing: {missing}"
 
 
 def period_report_known_issue_before_totals(con):
     """The local_amount defect disclosure appears before the
-    Reconciliation section, not after - checked by byte offset, not by
-    assuming the script wrote them in the order the source lists them."""
-    text = build_period_report.REPORT_MD.read_text()
-    issue_pos = text.find("Known issue")
-    recon_pos = text.find("## Reconciliation")
-    ok = issue_pos != -1 and recon_pos != -1 and issue_pos < recon_pos
-    return ok, f"'Known issue' at offset {issue_pos}, '## Reconciliation' at {recon_pos} (want issue first)"
+    Reconciliation section, not after, in every period's report -
+    checked by byte offset, not by assuming the script wrote them in
+    the order the source lists them."""
+    bad = []
+    for _, y, p in BACKFILL_PERIODS:
+        text = build_period_report.report_path(y, p).read_text()
+        issue_pos = text.find("Known issue")
+        recon_pos = text.find("## Reconciliation")
+        if issue_pos == -1 or recon_pos == -1 or issue_pos >= recon_pos:
+            bad.append(f"{y}-{p:02d}")
+    return not bad, "issue before reconciliation in all 3 reports" if not bad else f"wrong order in: {bad}"
 
 
 def period_report_numbers_match_source(con):
-    """Every headline number in the report is parsed back out and
+    """Every headline number in each report is parsed back out and
     compared against a fresh query, not trusted from generation time."""
-    text = build_period_report.REPORT_MD.read_text()
-    data = build_period_report._fetch(con)
-    n_accounts, stg_total, fact_total, gap, n_exceptions = data["period_summary"]
-
     bad = []
-    if f"Accounts compared: **{n_accounts}**" not in text:
-        bad.append("account count")
-    if f"{stg_total:,.2f}" not in text:
-        bad.append("stg total")
-    if f"{fact_total:,.2f}" not in text:
-        bad.append("fact total")
-    if f"{data['dc_gap']:,.2f}" not in text:
-        bad.append("debit/credit gap")
-    for _, _, count, amt in data["mismatch"]:
-        if f"| {count} | {amt:,.2f} |" not in text:
-            bad.append(f"mismatch row count={count} amount={amt}")
+    for c, y, p in BACKFILL_PERIODS:
+        text = build_period_report.report_path(y, p).read_text()
+        data = build_period_report._fetch(con, c, y, p)
+        n_accounts, stg_total, fact_total, gap, n_exceptions = data["period_summary"]
+        label = f"{y}-{p:02d}"
 
-    return not bad, f"missing or mismatched in report: {bad}" if bad else "every checked figure present and matching"
+        if f"Accounts compared: **{n_accounts}**" not in text:
+            bad.append(f"{label} account count")
+        if f"{stg_total:,.2f}" not in text:
+            bad.append(f"{label} stg total")
+        if f"{fact_total:,.2f}" not in text:
+            bad.append(f"{label} fact total")
+        if f"{data['dc_gap']:,.2f}" not in text:
+            bad.append(f"{label} debit/credit gap")
+        for _, _, count, amt in data["mismatch"]:
+            if f"| {count} | {amt:,.2f} |" not in text:
+                bad.append(f"{label} mismatch row count={count} amount={amt}")
+
+    return not bad, f"missing or mismatched: {bad}" if bad else "every checked figure present and matching in all 3 reports"
 
 
 def period_report_never_claims_verified_or_final(con):
-    """The report explicitly disclaims "verified close" and "final" for
+    """Every report explicitly disclaims "verified close" and "final" for
     the local_amount total, per the mission 09 ruling - that phrasing is
     exactly what a reader would mistake for a signed number."""
-    text = build_period_report.REPORT_MD.read_text()
-    ok = 'not a "verified close"' in text and 'not a "final"' in text
-    return ok, "both disclaimers present" if ok else "one or both disclaimers missing"
+    bad = []
+    for _, y, p in BACKFILL_PERIODS:
+        text = build_period_report.report_path(y, p).read_text()
+        if 'not a "verified close"' not in text or 'not a "final"' not in text:
+            bad.append(f"{y}-{p:02d}")
+    return not bad, "both disclaimers present in all 3 reports" if not bad else f"missing in: {bad}"
 
 
 def period_report_signoff_lines_present(con):
     """The exact two-line sign-off block the mission ruling specified is
-    present verbatim, not paraphrased."""
-    text = build_period_report.REPORT_MD.read_text()
-    ok = "Reconciliation: accepted" in text and "Reported local_amount total: not signed" in text
-    return ok, "both sign-off lines present verbatim" if ok else "one or both sign-off lines missing or reworded"
+    present verbatim, not paraphrased, in every period's report."""
+    bad = []
+    for _, y, p in BACKFILL_PERIODS:
+        text = build_period_report.report_path(y, p).read_text()
+        if "Reconciliation: accepted" not in text or "Reported local_amount total: not signed" not in text:
+            bad.append(f"{y}-{p:02d}")
+    return not bad, "both sign-off lines present verbatim in all 3 reports" if not bad else f"missing or reworded in: {bad}"
 
 
 def period_report_idempotent_rebuild(con):
-    """Rebuilding the report from the same warehouse state reproduces an
-    identical file - the actual idempotency proof, not just a claim."""
-    before = build_period_report.REPORT_MD.read_bytes()
-    build_period_report.build_period_report(con)
-    after = build_period_report.REPORT_MD.read_bytes()
-    return before == after, "identical" if before == after else "rebuild produced a different file"
+    """Rebuilding every report from the same warehouse state reproduces
+    an identical file - the actual idempotency proof, not just a claim."""
+    changed = []
+    for c, y, p in BACKFILL_PERIODS:
+        path = build_period_report.report_path(y, p)
+        before = path.read_bytes()
+        build_period_report.build_period_report(con, c, y, p)
+        after = path.read_bytes()
+        if before != after:
+            changed.append(f"{y}-{p:02d}")
+    return not changed, "all 3 reports identical after rebuild" if not changed else f"rebuild changed: {changed}"
 
 
-# --- Ticket 10+: backfill ---------------------------------------------------
+# --- Ticket 10: backfill 2024-02 and 2024-03 --------------------------------
+
+def p01_unchanged_after_backfill(con):
+    """P01's fact_gl_line row count, document count, and SUM(local_amount)
+    are byte-identical before and after the P02/P03 backfill - the
+    mandatory test from the ticket 10 ruling ("after P02 runs, P01 must
+    match the already-signed-off file in every column"), pinned here as a
+    permanent regression check instead of a one-off manual comparison."""
+    got = con.execute(f"""
+        SELECT COUNT(*), COUNT(DISTINCT document_id), ROUND(SUM(local_amount), 2)
+        FROM fact_gl_line WHERE {P01_FILTER}
+    """).fetchone()
+    return got == P01_FACT_ANCHOR, f"got={got}  want={P01_FACT_ANCHOR}"
+
+
+def dq_violations_present_every_period(con):
+    """P02 and P03 loaded through the same quality gate as P01, not an
+    empty gate result silently assumed clean - each period has its own
+    real dq_violations rows."""
+    counts = con.execute(f"""
+        SELECT fiscal_period, COUNT(*) FROM dq_violations WHERE {SCOPE} GROUP BY 1 ORDER BY 1
+    """).fetchall()
+    periods_with_rows = {p for p, n in counts if n > 0}
+    return periods_with_rows == {1, 2, 3}, f"periods with dq_violations rows={sorted(periods_with_rows)}  want=[1, 2, 3]"
+
+
+def recon_tables_hold_all_three_periods(con):
+    """recon_period_summary and recon_mismatch both hold P01+P02+P03 at
+    once - the per-period rebuild mode (mission 10) deletes and rewrites
+    only the period it's given, so loading P02/P03 must never wipe P01's
+    already-signed-off rows."""
+    summary_periods = {r[0] for r in con.execute("SELECT DISTINCT fiscal_period FROM recon_period_summary").fetchall()}
+    mismatch_periods = {r[0] for r in con.execute("SELECT DISTINCT fiscal_period FROM recon_mismatch").fetchall()}
+    want = {1, 2, 3}
+    ok = summary_periods == want and mismatch_periods == want
+    return ok, f"recon_period_summary periods={sorted(summary_periods)}  recon_mismatch periods={sorted(mismatch_periods)}  want={sorted(want)}"
+
 
 
 CHECKS = [
@@ -754,6 +837,9 @@ CHECKS = [
     ("period report never claims verified/final", period_report_never_claims_verified_or_final),
     ("period report sign-off lines present", period_report_signoff_lines_present),
     ("period report idempotent rebuild", period_report_idempotent_rebuild),
+    ("P01 unchanged after backfill", p01_unchanged_after_backfill),
+    ("dq_violations present every period", dq_violations_present_every_period),
+    ("recon tables hold all 3 periods", recon_tables_hold_all_three_periods),
 ]
 
 

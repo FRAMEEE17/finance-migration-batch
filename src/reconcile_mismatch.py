@@ -1,4 +1,5 @@
-"""Document-level reconciliation with bucket + cause. Ticket 8 / Mission 08.
+"""Document-level reconciliation with bucket + cause. Ticket 8 / Mission
+08, parameterized by period in Ticket 10 / Mission 10.
 
 Builds recon_mismatch: one row per grain-level difference between stg_gl
 and the close-eligible subset of fact_gl_line (excludes rows flagged
@@ -18,9 +19,7 @@ Bucket assignment:
     flagged out of the close-eligible view. Cause is whichever flag is
     set (opening_balance / closing_entry / post_close).
   - amount_changed: present in both, close-eligible, but local_amount
-    differs by more than 0.01. No real case in P01; the bucket logic is
-    built and proven with a synthetic row, cause-assignment logic for it
-    is not (see mission 08's Non-goals).
+    differs by more than 0.01.
   - missing_in_stg: in fact_gl_line, absent from stg_gl. Should never
     happen (fact_gl_line is built as a filtered subset of stg_gl); kept
     as a guard, not expected to ever hold a row.
@@ -35,29 +34,82 @@ every recon_mismatch row as informational attributes (nullable, from
 recon_reversal_pairs) so a reader can see a mismatched row is also part
 of a detected pair, without that fact changing its bucket or cause.
 
-Run: python src/reconcile_mismatch.py
+Deletes and rebuilds ONLY the periods passed in - same rule as
+src/reconcile_account.py (mission 10): a bare DELETE/CREATE OR REPLACE
+against the full table would silently wipe every other period's already-
+classified rows the moment a second period is processed.
+
+Run: python src/reconcile_mismatch.py [<company_code> <fiscal_year> <fiscal_period> ...]
+  no args: rebuild for every period currently in fact_gl_line
+  with args: rebuild only the given (company, year, period) triples
 """
 
 import sys
+from typing import List, Optional, Tuple
 
 import duckdb  # type: ignore
 
 from config import WAREHOUSE_DB
-from load_fact import PERIOD_FILTER
+
+Period = Tuple[int, int, int]
 
 
-def build_recon_mismatch(con) -> int:
+def all_loaded_periods(con) -> List[Period]:
+    rows = con.execute("""
+        SELECT DISTINCT company_code, fiscal_year, fiscal_period FROM fact_gl_line ORDER BY 1, 2, 3
+    """).fetchall()
+    return [(r[0], r[1], r[2]) for r in rows]
+
+
+def _periods_sql(periods: List[Period], alias: str = "") -> str:
+    """Always returns a single, self-contained parenthesized expression,
+    e.g. "((p1) OR (p2))" - callers that append " AND ..." to this in the
+    same WHERE clause must not have the AND silently bind to only the
+    last OR-ed period (SQL's AND binds tighter than OR). This exact bug
+    hit f_close_eligible below on the first multi-period run: "WHERE
+    {scope} AND NOT is_opening_balance..." only applied the NOT
+    conditions to the last period before this fix."""
+    prefix = f"{alias}." if alias else ""
+    clauses = " OR ".join(
+        f"({prefix}company_code = {c} AND {prefix}fiscal_year = {y} AND {prefix}fiscal_period = {p})"
+        for c, y, p in periods
+    )
+    return f"({clauses})"
+
+
+def ensure_table(con) -> None:
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS recon_mismatch (
+            company_code BIGINT, document_id VARCHAR, line_number BIGINT,
+            fiscal_year BIGINT, fiscal_period BIGINT,
+            bucket VARCHAR, cause VARCHAR, gap DOUBLE,
+            pair_id VARCHAR, is_swap_valid BOOLEAN
+        )
+    """)
+
+
+def build_recon_mismatch(con, periods: Optional[List[Period]] = None) -> int:
+    ensure_table(con)
+    if periods is None:
+        periods = all_loaded_periods(con)
+    if not periods:
+        return 0
+
+    scope = _periods_sql(periods)
+
+    con.execute(f"DELETE FROM recon_mismatch WHERE {scope}")
+
     con.execute(f"""
-        CREATE OR REPLACE TABLE recon_mismatch AS
+        INSERT INTO recon_mismatch
         WITH s AS (
-            SELECT * FROM stg_gl WHERE {PERIOD_FILTER}
+            SELECT * FROM stg_gl WHERE {scope}
         ),
         f_full AS (
-            SELECT * FROM fact_gl_line
+            SELECT * FROM fact_gl_line WHERE {scope}
         ),
         f_close_eligible AS (
             SELECT * FROM fact_gl_line
-            WHERE NOT is_opening_balance AND NOT is_closing_entry AND NOT is_post_close
+            WHERE {scope} AND NOT is_opening_balance AND NOT is_closing_entry AND NOT is_post_close
         ),
         joined AS (
             SELECT
@@ -120,16 +172,26 @@ def build_recon_mismatch(con) -> int:
         ) p ON p.document_id = c.document_id
         WHERE c.bucket != 'matched'
     """)
-    return con.execute("SELECT COUNT(*) FROM recon_mismatch").fetchone()[0]
+    return con.execute(f"SELECT COUNT(*) FROM recon_mismatch WHERE {scope}").fetchone()[0]
 
 
 def main() -> int:
     con = duckdb.connect(str(WAREHOUSE_DB))
-    n = build_recon_mismatch(con)
-    by_bucket = con.execute("SELECT bucket, COUNT(*) FROM recon_mismatch GROUP BY 1 ORDER BY 1").fetchall()
-    by_cause = con.execute("SELECT cause, COUNT(*) FROM recon_mismatch GROUP BY 1 ORDER BY 1").fetchall()
-    unknown_pct = con.execute("""
-        SELECT ROUND(100.0 * SUM((cause = 'unknown')::int) / COUNT(*), 1) FROM recon_mismatch
+    periods = None
+    if len(sys.argv) > 1:
+        vals = [int(v) for v in sys.argv[1:]]
+        if len(vals) % 3 != 0:
+            print("usage: python src/reconcile_mismatch.py [<company_code> <fiscal_year> <fiscal_period> ...]")
+            return 1
+        periods = [tuple(vals[i:i + 3]) for i in range(0, len(vals), 3)]
+
+    n = build_recon_mismatch(con, periods)
+    scope_periods = periods if periods is not None else all_loaded_periods(con)
+    scope = _periods_sql(scope_periods) if scope_periods else "1=0"
+    by_bucket = con.execute(f"SELECT bucket, COUNT(*) FROM recon_mismatch WHERE {scope} GROUP BY 1 ORDER BY 1").fetchall()
+    by_cause = con.execute(f"SELECT cause, COUNT(*) FROM recon_mismatch WHERE {scope} GROUP BY 1 ORDER BY 1").fetchall()
+    unknown_pct = con.execute(f"""
+        SELECT ROUND(100.0 * SUM((cause = 'unknown')::int) / COUNT(*), 1) FROM recon_mismatch WHERE {scope}
     """).fetchone()[0]
     con.close()
 

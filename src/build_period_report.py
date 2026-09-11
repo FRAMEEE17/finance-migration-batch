@@ -1,44 +1,61 @@
-"""Period report for finance sign-off. Ticket 9 / Mission 09.
+"""Period report for finance sign-off. Ticket 9 / Mission 09,
+parameterized by period in Ticket 10 / Mission 10.
 
-Writes reports/period_2024-01.md from the warehouse tables built by
-tickets 5-8 (dq_violations, recon_period_summary, recon_mismatch,
+Writes reports/period_<year>-<period>.md from the warehouse tables built
+by tickets 5-8 (dq_violations, recon_period_summary, recon_mismatch,
 recon_reversal_pairs). No new computation happens here; this script only
-assembles and formats numbers those tables already hold.
+assembles and formats numbers those tables already hold, filtered to the
+one period being reported.
 
 The sign-off in this report is split into two pieces on purpose, per the
-human ruling on mission 09:
+human ruling on mission 09 (and reaffirmed unchanged for every period in
+mission 10):
   - the stg_gl vs fact_gl_line reconciliation is accepted (clean by every
-    check this project runs: 0.00 gap, all accounts matching, 0% unknown)
+    check this project runs)
   - the reported local_amount total is NOT signed (it inherits a known
-    source-data defect, mission 06 / issue #13, and both sides of the
-    comparison carry the same broken numbers, so a clean reconciliation
-    here doesn't mean the total is correct)
+    source-data defect, mission 06 / issue #13, confirmed systemic across
+    P01-P03 in mission 10, and both sides of the comparison carry the
+    same broken numbers, so a clean reconciliation here doesn't mean the
+    total is correct)
 Never write "verified close" or "final" anywhere in this report about
 the local_amount total - that phrasing is exactly what a reader would
 mistake for a signed number.
 
-Run: python src/build_period_report.py
+recon_reversal_pairs is scoped to pairs whose ORIGINAL document posted in
+the period being reported (not the reversal's period, and not the whole
+P01-P03 table) - this is the one table that isn't naturally one-row-per-
+period, and "reversals initiated this period" is the partition that adds
+up to the whole table across all three periods without double-counting
+(mission 10's exploration: 337 + 356 + 332 = 1,025).
+
+Run: python src/build_period_report.py <company_code> <fiscal_year> <fiscal_period>
+  e.g. python src/build_period_report.py 1000 2024 2
 """
 
 import sys
+from pathlib import Path
+from typing import List
 
 import duckdb  # type: ignore
 
 from config import REPO_ROOT, WAREHOUSE_DB
 
-REPORT_MD = REPO_ROOT / "reports" / "period_2024-01.md"
 
-KNOWN_ISSUE_PARAGRAPH = (
-    "The number in the local_amount column below is broken for 20 documents "
-    "this period. The stg-vs-fact comparison shows a perfect match only "
-    "because both sides inherit the same broken figures, not because either "
-    "one was independently verified. Debit and credit are the more reliable "
-    "signal for this period's true balance: see the Reconciliation section "
-    "for both."
-)
+def report_path(fiscal_year: int, fiscal_period: int) -> Path:
+    return REPO_ROOT / "reports" / f"period_{fiscal_year}-{fiscal_period:02d}.md"
 
 
-def _markdown_table(header: list[str], rows: list[list[str]]) -> list[str]:
+def _no_neg_zero(v):
+    """DuckDB's parallel SUM is not associativity-safe: the same query
+    can return a tiny negative float (e.g. -2e-7) instead of exactly 0.0
+    depending on thread scheduling, which after ROUND(...,2) prints as
+    "-0.00" instead of "0.00" - same number, different sign a reader
+    would misread as a real asymmetry. -0.0 + 0.0 == 0.0 in IEEE 754, so
+    this is a no-op on every value except that one."""
+    return v if v is None else v + 0.0
+
+
+def _markdown_table(header: List[str], rows: List[List[str]]) -> List[str]:
     if not rows:
         return ["none"]
     out = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
@@ -46,50 +63,82 @@ def _markdown_table(header: list[str], rows: list[list[str]]) -> list[str]:
     return out
 
 
-def _fetch(con) -> dict:
-    period_summary = con.execute("""
+def _fetch(con, company_code: int, fiscal_year: int, fiscal_period: int) -> dict:
+    pf = f"company_code = {company_code} AND fiscal_year = {fiscal_year} AND fiscal_period = {fiscal_period}"
+
+    period_summary_row = con.execute(f"""
         SELECT COUNT(*), ROUND(SUM(stg_local_total), 2), ROUND(SUM(fact_local_total), 2),
                ROUND(SUM(local_amount_gap), 2),
                SUM((ABS(local_amount_gap) > 0.01)::int)
-        FROM recon_period_summary
+        FROM recon_period_summary WHERE {pf}
+    """).fetchone()
+    n_accounts, stg_total, fact_total, local_gap, n_exceptions = period_summary_row
+    period_summary = (n_accounts, _no_neg_zero(stg_total), _no_neg_zero(fact_total), _no_neg_zero(local_gap), n_exceptions)
+
+    exceptions = [
+        (account, _no_neg_zero(s), _no_neg_zero(f), _no_neg_zero(g))
+        for account, s, f, g in con.execute(f"""
+            SELECT gl_account, stg_local_total, fact_local_total, local_amount_gap
+            FROM recon_period_summary WHERE {pf} AND ABS(local_amount_gap) > 0.01
+            ORDER BY gl_account
+        """).fetchall()
+    ]
+
+    dc_gap = _no_neg_zero(con.execute(f"""
+        SELECT ROUND(SUM(debit_amount) - SUM(credit_amount), 2) FROM stg_gl WHERE {pf}
+    """).fetchone()[0])
+
+    # Materiality cutoff matches mission 06's original split: dq_violations'
+    # local_amount_imbalance check flags any nonzero net (23 rows for P01),
+    # but 3 of those are genuine sub-cent rounding, not the broadcast-total
+    # defect this report exists to disclose. Only documents over 0.01 count
+    # as "the defect" here, same threshold mission 06 used to tell them apart.
+    imbalanced = con.execute(f"""
+        WITH doc_totals AS (
+            SELECT document_id, ROUND(SUM(local_amount), 2) AS local_amount
+            FROM stg_gl WHERE {pf}
+            GROUP BY 1
+        ),
+        flagged AS (
+            SELECT DISTINCT document_id FROM dq_violations
+            WHERE check_name = 'local_amount_imbalance' AND {pf}
+        )
+        SELECT COUNT(*), ROUND(SUM(doc_totals.local_amount), 2)
+        FROM doc_totals JOIN flagged USING (document_id)
+        WHERE ABS(doc_totals.local_amount) > 0.01
     """).fetchone()
 
-    exceptions = con.execute("""
-        SELECT gl_account, stg_local_total, fact_local_total, local_amount_gap
-        FROM recon_period_summary WHERE ABS(local_amount_gap) > 0.01
-        ORDER BY gl_account
-    """).fetchall()
+    mismatch = [
+        (bucket, cause, count, _no_neg_zero(amt))
+        for bucket, cause, count, amt in con.execute(f"""
+            SELECT bucket, cause, COUNT(*), ROUND(SUM(gap), 2) FROM recon_mismatch WHERE {pf} GROUP BY 1, 2 ORDER BY 1, 2
+        """).fetchall()
+    ]
 
-    dc_gap = con.execute(f"""
-        SELECT ROUND(SUM(debit_amount) - SUM(credit_amount), 2)
-        FROM stg_gl WHERE company_code = 1000 AND fiscal_year = 2024 AND fiscal_period = 1
-    """).fetchone()[0]
-
-    mismatch = con.execute("""
-        SELECT bucket, cause, COUNT(*), ROUND(SUM(gap), 2) FROM recon_mismatch GROUP BY 1, 2 ORDER BY 1, 2
-    """).fetchall()
-
-    unknown_pct = con.execute("""
-        SELECT ROUND(100.0 * SUM((cause = 'unknown')::int) / COUNT(*), 1) FROM recon_mismatch
+    unknown_pct = con.execute(f"""
+        SELECT ROUND(100.0 * SUM((cause = 'unknown')::int) / COUNT(*), 1) FROM recon_mismatch WHERE {pf}
     """).fetchone()[0] or 0.0
 
-    reversal = con.execute("""
+    reversal = con.execute(f"""
         SELECT COUNT(*), SUM(cross_period::int), SUM(is_net_zero::int), SUM((NOT is_net_zero)::int)
         FROM recon_reversal_pairs
+        WHERE original_fiscal_year = {fiscal_year} AND original_fiscal_period = {fiscal_period}
     """).fetchone()
 
-    dq = con.execute("""
-        SELECT check_name, blocking, COUNT(*) FROM dq_violations GROUP BY 1, 2 ORDER BY 2 DESC, 1
+    dq = con.execute(f"""
+        SELECT check_name, blocking, COUNT(*) FROM dq_violations WHERE {pf} GROUP BY 1, 2 ORDER BY 2 DESC, 1
     """).fetchall()
 
-    unbalanced_excluded = con.execute("""
-        SELECT COUNT(*) FROM dq_violations WHERE check_name = 'unbalanced_document' AND blocking = true
+    unbalanced_excluded = con.execute(f"""
+        SELECT COUNT(*) FROM dq_violations WHERE {pf} AND check_name = 'unbalanced_document' AND blocking = true
     """).fetchone()[0]
 
     return {
         "period_summary": period_summary,
         "exceptions": exceptions,
         "dc_gap": dc_gap,
+        "imbalanced_doc_count": imbalanced[0] or 0,
+        "imbalanced_total": imbalanced[1] or 0.0,
         "mismatch": mismatch,
         "unknown_pct": unknown_pct,
         "reversal": reversal,
@@ -98,24 +147,47 @@ def _fetch(con) -> dict:
     }
 
 
-def build_report_text(data: dict) -> str:
+def build_report_text(data: dict, company_code: int, fiscal_year: int, fiscal_period: int) -> str:
     n_accounts, stg_total, fact_total, gap, n_exceptions = data["period_summary"]
+    label = f"{fiscal_year}-{fiscal_period:02d}"
+    imbalanced_docs = data["imbalanced_doc_count"]
+    imbalanced_total = data["imbalanced_total"]
+
+    known_issue_paragraph = (
+        f"The number in the local_amount column below is broken for {imbalanced_docs} "
+        "documents this period. The stg-vs-fact comparison shows a perfect match only "
+        "because both sides inherit the same broken figures, not because either "
+        "one was independently verified. Debit and credit are the more reliable "
+        "signal for this period's true balance: see the Reconciliation section "
+        "for both."
+    ) if imbalanced_docs else (
+        "No local_amount defect documents were found for this period at build time. "
+        "See issue #13 for the pattern found in other periods before treating this "
+        "period's local_amount total as verified."
+    )
 
     lines = [
-        "# Period report: 2024-01",
+        f"# Period report: {label}",
         "",
-        "Company 1000, fiscal year 2024, period 01. Draft for finance review,",
-        "see the sign-off section at the end before treating any number here",
-        "as final.",
+        f"Company {company_code}, fiscal year {fiscal_year}, period {fiscal_period:02d}.",
+        "Draft for finance review, see the sign-off section at the end before",
+        "treating any number here as final.",
         "",
         "## Known issue: local_amount is not reliable this period",
         "",
-        KNOWN_ISSUE_PARAGRAPH,
+        known_issue_paragraph,
         "",
-        f"Scale: **{97144587.1:,.1f}** across 20 documents. Full technical detail:",
-        "`docs/period-close-notes/2024-01-local-amount-defect.md`, source-data",
-        "investigation tracked in issue #13.",
-        "",
+    ]
+    if imbalanced_docs:
+        lines += [
+            f"Scale: **{imbalanced_total:,.1f}** across {imbalanced_docs} documents. Full technical",
+            "detail: `docs/period-close-notes/2024-01-local-amount-defect.md` (the P01",
+            "finding; mission 10 confirmed the same pattern in P02/P03), source-data",
+            "investigation tracked in issue #13.",
+            "",
+        ]
+
+    lines += [
         "## Reconciliation (stg_gl vs fact_gl_line)",
         "",
         f"- Accounts compared: **{n_accounts}**",
@@ -124,12 +196,12 @@ def build_report_text(data: dict) -> str:
         f"- local_amount total, fact side: {fact_total:,.2f}",
         f"- local_amount gap: {gap:,.2f} (see Known Issue above before reading this as clean)",
         f"- debit/credit gap, whole scope: **{data['dc_gap']:,.2f}** (the more trustworthy figure;",
-        f"  {data['unbalanced_excluded']} document excluded as unbalanced, this is what's left)",
+        f"  {data['unbalanced_excluded']} document(s) excluded as unbalanced, this is what's left)",
         "",
     ]
 
     if data["exceptions"]:
-        lines.append("Accounts with a real local_amount gap (both from the excluded unbalanced document):")
+        lines.append("Accounts with a real local_amount gap:")
         lines.append("")
         lines += _markdown_table(
             ["gl_account", "stg total", "fact total", "gap"],
@@ -150,13 +222,14 @@ def build_report_text(data: dict) -> str:
     lines.append("")
 
     total_pairs, cross_period, valid, invalid = data["reversal"]
+    total_pairs = total_pairs or 0
     lines += [
-        "## Reversal pairs",
+        "## Reversal pairs (originated this period)",
         "",
         f"- Detected pairs: **{total_pairs}**",
-        f"- Crossing a period boundary (original and reversal in different periods): {cross_period}",
-        f"- Economically valid (debit/credit correctly swap): {valid}",
-        f"- Flagged as not a real reversal (see issue #7 - mostly planted fraud/anomaly cases): {invalid}",
+        f"- Crossing a period boundary (reversal posts in a different period): {cross_period or 0}",
+        f"- Economically valid (debit/credit correctly swap): {valid or 0}",
+        f"- Flagged as not a real reversal (see issue #7 - mostly planted fraud/anomaly cases): {invalid or 0}",
         "",
         "## Data quality, for context (none of this blocks the reconciliation above)",
         "",
@@ -178,14 +251,19 @@ def build_report_text(data: dict) -> str:
         "",
         "- the stg_gl vs fact_gl_line reconciliation is clean: 0.00 gap,",
         f"  {n_accounts - n_exceptions}/{n_accounts} accounts match exactly, 0% unknown mismatches",
-        f"- the 1 unbalanced document is correctly excluded; the remaining",
-        f"  debit/credit gap for the period is {data['dc_gap']:,.2f}",
+        f"- unbalanced documents are correctly excluded; the remaining debit/credit",
+        f"  gap for the period is {data['dc_gap']:,.2f}",
         "",
         "**Not signed:**",
         "",
         "- the period close total as measured by local_amount",
-        "- the 97,144,587.1 figure arising from the 20 documents that broadcast",
-        "  a document total across every debit line instead of a per-line amount",
+    ]
+    if imbalanced_docs:
+        lines.append(
+            f"- the {imbalanced_total:,.1f} figure arising from {imbalanced_docs} documents that "
+            "broadcast a document total across every debit line instead of a per-line amount"
+        )
+    lines += [
         "- this report is not a \"verified close\" and not a \"final\" number for",
         "  local_amount, regardless of how clean the reconciliation above looks",
         "",
@@ -202,25 +280,32 @@ def build_report_text(data: dict) -> str:
         "---",
         "Technical references: `recon_period_summary`, `recon_mismatch`,",
         "`recon_reversal_pairs`, `dq_violations` in `warehouse.duckdb`.",
-        "Issue: #9. Related: #6, #13.",
+        f"Issue: #9 (report pattern), #10 (this period's backfill). Related: #6, #13.",
         "",
     ]
 
     return "\n".join(lines) + "\n"
 
 
-def build_period_report(con) -> None:
-    data = _fetch(con)
-    text = build_report_text(data)
-    REPORT_MD.parent.mkdir(exist_ok=True)
-    REPORT_MD.write_text(text)
+def build_period_report(con, company_code: int, fiscal_year: int, fiscal_period: int) -> Path:
+    data = _fetch(con, company_code, fiscal_year, fiscal_period)
+    text = build_report_text(data, company_code, fiscal_year, fiscal_period)
+    path = report_path(fiscal_year, fiscal_period)
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(text)
+    return path
 
 
 def main() -> int:
+    if len(sys.argv) != 4:
+        print("usage: python src/build_period_report.py <company_code> <fiscal_year> <fiscal_period>")
+        return 1
+    company_code, fiscal_year, fiscal_period = (int(v) for v in sys.argv[1:4])
+
     con = duckdb.connect(str(WAREHOUSE_DB), read_only=True)
-    build_period_report(con)
+    path = build_period_report(con, company_code, fiscal_year, fiscal_period)
     con.close()
-    print(f"wrote {REPORT_MD}")
+    print(f"wrote {path}")
     return 0
 
 
