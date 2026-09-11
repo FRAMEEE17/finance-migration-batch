@@ -43,7 +43,7 @@ runs each query across every core it can find). The 20-minute budget in
 issue #12 is for reading this file and understanding what you're
 looking at, not for the commands to finish.
 
-`src/checks.py` should end with `56/56 passed`. If it doesn't, read the
+`src/checks.py` should end with `N/N passed`, all green. If it doesn't, read the
 failing check's own name and detail line before touching any SQL — each
 one states what it measured, not just pass/fail.
 
@@ -108,12 +108,12 @@ period boundary doesn't net to zero and disappear in the original
 period — it still shows up there as its own line, because the
 reversal itself hasn't happened yet as far as that period is concerned.
 
-## Sign-off is split
+## Sign-off is split, and the report isn't the artifact
 
 Every `reports/period_<year>-<period>.md` separates two different
 claims:
 
-- the `stg_gl` vs `fact_gl_line` reconciliation — signed, once the
+- the `stg_gl` vs `fact_gl_line` reconciliation — accepted, once the
   gap is 0.00 and every account matches
 - the reported `local_amount` total — **not signed**, because a set of
   documents has `local_amount` broadcasting a document's grand total
@@ -126,6 +126,16 @@ shape in P02 and P03, growing each period (20 documents / $97.1M in
 P01, 27 / $104.1M in P02, 36 / $340.5M in P03). Until issue #13 fixes
 the source, the number to use for period judgment is the debit/credit
 gap, not `local_amount`.
+
+The Markdown file itself is a working paper, not what an accounting
+department calls a closed period (ADR-0008) - this project reconciles
+a source extract, it doesn't stand in for a subledger. The same two
+states above land in `period_signoff` too (`recon_status`,
+`local_amount_status`), one row per period, machine-readable - that
+table, not the Markdown prose, is what a future PDF or BI dashboard
+would read. Building either of those is out of scope for now; don't
+wire a BI dashboard straight to `local_amount` before `period_signoff`
+exists to sit in front of it.
 
 ## One Python-version trap
 

@@ -667,7 +667,7 @@ def mismatch_pair_enrichment_never_changes_bucket(con):
     return bad == 0, f"{bad} rows where pair membership leaked into bucket/cause"
 
 
-# Ticket 9: period report for finance sign-off
+# Ticket 9: period report (working paper, not the sign-off artifact - ADR-0008)
 
 def period_report_exists(con):
     missing = [
@@ -753,6 +753,34 @@ def period_report_idempotent_rebuild(con):
         if before != after:
             changed.append(f"{y}-{p:02d}")
     return not changed, "all 3 reports identical after rebuild" if not changed else f"rebuild changed: {changed}"
+
+
+# ADR-0008: period_signoff, the machine-readable close state a BI tool or
+# PDF generator would read - not the Markdown report itself
+
+def period_signoff_matches_report(con):
+    """period_signoff and the report it's derived from must agree - one
+    computation (_fetch), two outputs, checked here so they can't
+    silently drift apart."""
+    bad = []
+    for c, y, p in BACKFILL_PERIODS:
+        row = con.execute(f"""
+            SELECT accounts_compared, accounts_matched, local_amount_status
+            FROM period_signoff
+            WHERE company_code = {c} AND fiscal_year = {y} AND fiscal_period = {p}
+        """).fetchone()
+        if row is None:
+            bad.append(f"{y}-{p:02d}: missing from period_signoff")
+            continue
+        n_accounts, n_matched, local_amount_status = row
+        text = build_period_report.report_path(y, p).read_text()
+        if f"Accounts compared: **{n_accounts}**" not in text:
+            bad.append(f"{y}-{p:02d}: accounts_compared disagrees with report")
+        if f"Accounts that match exactly: **{n_matched}**" not in text:
+            bad.append(f"{y}-{p:02d}: accounts_matched disagrees with report")
+        if local_amount_status != "not_signed":
+            bad.append(f"{y}-{p:02d}: local_amount_status={local_amount_status!r}, want 'not_signed' while issue #13 is open")
+    return not bad, "period_signoff agrees with all 3 reports" if not bad else f"disagreements: {bad}"
 
 
 # Ticket 10: backfill 2024-02 and 2024-03
@@ -849,6 +877,7 @@ CHECKS = [
     ("period report never claims verified/final", period_report_never_claims_verified_or_final),
     ("period report sign-off lines present", period_report_signoff_lines_present),
     ("period report idempotent rebuild", period_report_idempotent_rebuild),
+    ("period_signoff matches report", period_signoff_matches_report),
     ("P01 unchanged after backfill", p01_unchanged_after_backfill),
     ("dq_violations present every period", dq_violations_present_every_period),
     ("recon tables hold all 3 periods", recon_tables_hold_all_three_periods),

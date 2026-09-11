@@ -71,8 +71,11 @@ following:
   `missing_in_stg`, `amount_changed`, `intentionally_excluded`) and one cause
   from the fixed list in `docs/definitions.md`. `unknown` causes must stay
   under 20% of the period's mismatches or the report cannot be signed.
-- A signed-off deliverable exists per period: `reports/period_2024-01.md`
-  (totals by account, mismatch counts by bucket, cause table).
+- A working paper exists per period: `reports/period_2024-01.md` (totals by
+  account, mismatch counts by bucket, cause table), backed by a queryable
+  close state in `period_signoff` (recon status, local_amount status - see
+  ADR-0008). Neither one is the accounting department's own sign-off; this
+  project doesn't have a subledger, it reconciles a source extract.
 - A runbook lets someone run one period end to end in 20 minutes.
 
 ## 6. Non-goals of Step 0

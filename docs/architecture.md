@@ -28,7 +28,8 @@ flowchart LR
         rmm[("recon_mismatch<br/>bucket + cause")]
     end
 
-    report[["reports/period_YYYY-PP.md<br/>signed by finance"]]
+    report[["reports/period_YYYY-PP.md<br/>working paper"]]
+    signoff[("period_signoff<br/>machine-readable close state")]
 
     src --> stg
     stg --> audit
@@ -40,6 +41,7 @@ flowchart LR
     fact -. modeled side .-> recon
     rps --> report
     rmm --> report
+    report --> signoff
 ```
 
 Solid arrows are the data path. The dashed arrows into reconciliation are the
@@ -52,6 +54,15 @@ A rendered version of this diagram is at `docs/architecture.png`.
 **Base layer (not drawn):** engine is DuckDB + Parquet; orchestration is
 sequential Python scripts; the FY2025 P02 rows sit in `stg_gl` unreconciled
 until their period is in scope.
+
+**Where this sits in an actual close (ADR-0008):** an enterprise close
+runs on three layers - the subledger (SAP/Oracle/etc., the official
+balance, not built here), this warehouse + quality gate (tables and a
+pass/fail state), and what a human reads (a locked spreadsheet or PDF
+for close/audit, BI for executives). `reports/period_YYYY-PP.md` is a
+working paper in that third layer, not the artifact finance actually
+signs; `period_signoff` is the queryable state a PDF or BI tool would
+read once either exists. Neither is built by this project yet.
 
 ## Pattern legend
 
@@ -69,7 +80,7 @@ in `docs/design-patterns.md`.
 | `map_account` join | Static Joiner | enrichment from a small hand-owned file |
 | period partitions | Horizontal Partitioner | the replace and backfill unit is one period |
 | FY2025 P02 | Late Data Detector | out-of-scope rows stay visible, no merge |
-| signed period report | Readiness Marker | downstream trusts a period only after sign-off |
+| `period_signoff` | Readiness Marker | downstream trusts a period only once this row says so, not the Markdown prose (ADR-0008) |
 | `recon_mismatch` bucket + cause | Fine-Grained Tracker | row-level trace from a changed row to the rule that changed it |
 
 ## Warehouse tables
@@ -85,8 +96,10 @@ Flat table names in the default `main` schema; the prefix is the layer.
 | `dq_violations` | quality, dead-letter | quality gate |
 | `recon_period_summary` | reconciliation | account-level recon |
 | `recon_mismatch` | reconciliation | document-level recon |
+| `period_signoff` | readiness / close state | period report build (ADR-0008) |
 
 `map_account.csv` is a hand-approved file in the repo, not a warehouse
+table. Same for `reports/period_*.md` - a rendered working paper, not a
 table.
 
 ## Scaling path

@@ -11,7 +11,9 @@ the mismatch enums are in `docs/definitions.md`.
 - Never invent account codes.
 - Never fix totals by editing target amounts.
 - SQL is the reconcile engine, not Pandas.
-- A green test is not a closed period until `reports/period_YYYY-PP.md` exists.
+- A green test is not a closed period until `reports/period_YYYY-PP.md` exists
+  and `period_signoff` carries that period's status (ADR-0008: the report is
+  a working paper, `period_signoff` is the machine-readable close state).
 - Source of truth is the files in this repo.
 - Reconciling differences or changing a business rule is careful work. Slow
   down for it.
@@ -107,5 +109,7 @@ sign-off.
 
 A period total (`stg_gl` against `fact_gl_line`, per account, checked to
 0.01 tolerance), a count of documents that do not match, and a primary cause
-for every gap over 0.01 (not one bucket of `unknown`). The signed-off
-deliverable is `reports/period_<period>.md`.
+for every gap over 0.01 (not one bucket of `unknown`). `reports/period_<period>.md`
+is the evidence trail; `period_signoff` is the queryable close state built
+from it (ADR-0008). Neither is a substitute for an actual accounting-system
+sign-off - this repo doesn't have a subledger, it reconciles an extract.

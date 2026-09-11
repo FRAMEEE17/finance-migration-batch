@@ -1,11 +1,13 @@
-"""Period report for finance sign-off. Ticket 9, parameterized by period
-in ticket 10.
+"""Period report and sign-off state. Ticket 9, parameterized by period
+in ticket 10, split into working paper vs. machine-readable state in
+ADR-0008.
 
-Assembles reports/period_<year>-<period>.md from warehouse tables built
-by tickets 5-8; no new computation happens here. Sign-off is split in
-two: the stg_gl vs fact_gl_line reconciliation is accepted, but the
-reported local_amount total is not signed (issue #13). Never describe
-local_amount as "verified" or "final" in the output - see ADR-0006/0007.
+Assembles reports/period_<year>-<period>.md - a working paper, not the
+artifact an accounting department calls a closed period (ADR-0008) -
+and writes the same figures into period_signoff, one row per period,
+for whatever reads close status downstream (a future PDF, a BI
+dashboard). Both come from one _fetch() call; never two sources of
+truth that could drift apart.
 
 Run: python src/build_period_report.py <company_code> <fiscal_year> <fiscal_period>
   e.g. python src/build_period_report.py 1000 2024 2
@@ -269,7 +271,50 @@ def build_report_text(data: dict, company_code: int, fiscal_year: int, fiscal_pe
     return "\n".join(lines) + "\n"
 
 
+def ensure_period_signoff_table(con) -> None:
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS period_signoff (
+            company_code BIGINT, fiscal_year BIGINT, fiscal_period BIGINT,
+            recon_status VARCHAR, local_amount_status VARCHAR,
+            accounts_compared BIGINT, accounts_matched BIGINT,
+            dc_gap DOUBLE, unknown_mismatch_pct DOUBLE,
+            imbalanced_doc_count BIGINT, imbalanced_total DOUBLE,
+            report_path VARCHAR, generated_at TIMESTAMP
+        )
+    """)
+
+
+def write_period_signoff(con, data: dict, company_code: int, fiscal_year: int, fiscal_period: int, path: Path) -> None:
+    """The machine-readable half of a period's close state (ADR-0008) -
+    same data dict the report text comes from, so the two can never
+    disagree. recon_status follows the same <20% unknown threshold that
+    blocks sign-off project-wide (docs/business-rules.md); local_amount
+    is a human call tied to issue #13, not something this function can
+    derive, so it stays not_signed until that issue closes and a human
+    updates it."""
+    ensure_period_signoff_table(con)
+    n_accounts, _, _, _, n_exceptions = data["period_summary"]
+    recon_status = "accepted" if data["unknown_pct"] < 20.0 else "blocked"
+
+    pf = f"company_code = {company_code} AND fiscal_year = {fiscal_year} AND fiscal_period = {fiscal_period}"
+    con.execute(f"DELETE FROM period_signoff WHERE {pf}")
+    con.execute(
+        """
+        INSERT INTO period_signoff VALUES
+        (?, ?, ?, ?, 'not_signed', ?, ?, ?, ?, ?, ?, ?, now())
+        """,
+        [
+            company_code, fiscal_year, fiscal_period, recon_status,
+            n_accounts, n_accounts - n_exceptions, data["dc_gap"], data["unknown_pct"],
+            data["imbalanced_doc_count"], data["imbalanced_total"], str(path),
+        ],
+    )
+
+
 def build_period_report(con, company_code: int, fiscal_year: int, fiscal_period: int) -> Path:
+    """Writes only reports/period_<year>-<period>.md. Read-only-safe - a
+    report rebuild is a pure function of what's already in the
+    warehouse, and checks.py's idempotency check relies on that."""
     data = _fetch(con, company_code, fiscal_year, fiscal_period)
     text = build_report_text(data, company_code, fiscal_year, fiscal_period)
     path = report_path(fiscal_year, fiscal_period)
@@ -284,8 +329,10 @@ def main() -> int:
         return 1
     company_code, fiscal_year, fiscal_period = (int(v) for v in sys.argv[1:4])
 
-    con = duckdb.connect(str(WAREHOUSE_DB), read_only=True)
+    con = duckdb.connect(str(WAREHOUSE_DB))
     path = build_period_report(con, company_code, fiscal_year, fiscal_period)
+    data = _fetch(con, company_code, fiscal_year, fiscal_period)
+    write_period_signoff(con, data, company_code, fiscal_year, fiscal_period, path)
     con.close()
     print(f"wrote {path}")
     return 0
