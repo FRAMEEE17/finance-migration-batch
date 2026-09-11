@@ -26,6 +26,7 @@ import quality_gate  # noqa: E402
 import reconcile_account  # noqa: E402
 import reconcile_reversals  # noqa: E402
 import reconcile_mismatch  # noqa: E402
+import build_period_report  # noqa: E402
 
 from config import REPO_ROOT, SOURCE_PARQUET, WAREHOUSE_DB
 
@@ -630,6 +631,75 @@ def mismatch_pair_enrichment_never_changes_bucket(con):
     return bad == 0, f"{bad} rows where pair membership leaked into bucket/cause"
 
 
+# --- Ticket 9: period report for finance sign-off ---------------------------
+
+def period_report_exists(con):
+    return build_period_report.REPORT_MD.exists(), f"{build_period_report.REPORT_MD}"
+
+
+def period_report_known_issue_before_totals(con):
+    """The local_amount defect disclosure appears before the
+    Reconciliation section, not after - checked by byte offset, not by
+    assuming the script wrote them in the order the source lists them."""
+    text = build_period_report.REPORT_MD.read_text()
+    issue_pos = text.find("Known issue")
+    recon_pos = text.find("## Reconciliation")
+    ok = issue_pos != -1 and recon_pos != -1 and issue_pos < recon_pos
+    return ok, f"'Known issue' at offset {issue_pos}, '## Reconciliation' at {recon_pos} (want issue first)"
+
+
+def period_report_numbers_match_source(con):
+    """Every headline number in the report is parsed back out and
+    compared against a fresh query, not trusted from generation time."""
+    text = build_period_report.REPORT_MD.read_text()
+    data = build_period_report._fetch(con)
+    n_accounts, stg_total, fact_total, gap, n_exceptions = data["period_summary"]
+
+    bad = []
+    if f"Accounts compared: **{n_accounts}**" not in text:
+        bad.append("account count")
+    if f"{stg_total:,.2f}" not in text:
+        bad.append("stg total")
+    if f"{fact_total:,.2f}" not in text:
+        bad.append("fact total")
+    if f"{data['dc_gap']:,.2f}" not in text:
+        bad.append("debit/credit gap")
+    for _, _, count, amt in data["mismatch"]:
+        if f"| {count} | {amt:,.2f} |" not in text:
+            bad.append(f"mismatch row count={count} amount={amt}")
+
+    return not bad, f"missing or mismatched in report: {bad}" if bad else "every checked figure present and matching"
+
+
+def period_report_never_claims_verified_or_final(con):
+    """The report explicitly disclaims "verified close" and "final" for
+    the local_amount total, per the mission 09 ruling - that phrasing is
+    exactly what a reader would mistake for a signed number."""
+    text = build_period_report.REPORT_MD.read_text()
+    ok = 'not a "verified close"' in text and 'not a "final"' in text
+    return ok, "both disclaimers present" if ok else "one or both disclaimers missing"
+
+
+def period_report_signoff_lines_present(con):
+    """The exact two-line sign-off block the mission ruling specified is
+    present verbatim, not paraphrased."""
+    text = build_period_report.REPORT_MD.read_text()
+    ok = "Reconciliation: accepted" in text and "Reported local_amount total: not signed" in text
+    return ok, "both sign-off lines present verbatim" if ok else "one or both sign-off lines missing or reworded"
+
+
+def period_report_idempotent_rebuild(con):
+    """Rebuilding the report from the same warehouse state reproduces an
+    identical file - the actual idempotency proof, not just a claim."""
+    before = build_period_report.REPORT_MD.read_bytes()
+    build_period_report.build_period_report(con)
+    after = build_period_report.REPORT_MD.read_bytes()
+    return before == after, "identical" if before == after else "rebuild produced a different file"
+
+
+# --- Ticket 10+: backfill ---------------------------------------------------
+
+
 CHECKS = [
     ("stg_gl exists", stg_gl_exists),
     ("stg_gl row count == source", stg_gl_row_count_matches_source),
@@ -678,6 +748,12 @@ CHECKS = [
     ("mismatch amount_changed/missing_in_stg synthetic", mismatch_amount_changed_and_missing_in_stg_synthetic),
     ("mismatch pair enrichment present", mismatch_pair_enrichment_present),
     ("mismatch pair enrichment never changes bucket", mismatch_pair_enrichment_never_changes_bucket),
+    ("period report exists", period_report_exists),
+    ("period report known issue before totals", period_report_known_issue_before_totals),
+    ("period report numbers match source", period_report_numbers_match_source),
+    ("period report never claims verified/final", period_report_never_claims_verified_or_final),
+    ("period report sign-off lines present", period_report_signoff_lines_present),
+    ("period report idempotent rebuild", period_report_idempotent_rebuild),
 ]
 
 

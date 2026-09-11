@@ -88,17 +88,17 @@ every check this project runs, but rests on a known, unresolved
 
 ## Deterministic checks
 
-- [ ] Every number in `reports/period_2024-01.md` matches its source
+- [x] Every number in `reports/period_2024-01.md` matches its source
       table exactly (no rounding drift, no hand-typed figures) - checked
       by parsing the generated file back and comparing to a fresh query,
       not by eyeballing it once at generation time.
-- [ ] The `local_amount` defect disclosure appears before the
+- [x] The `local_amount` defect disclosure appears before the
       reconciliation totals in the file (byte offset comparison), not
       just present somewhere in the document.
-- [ ] Re-running `src/build_period_report.py` twice produces an
+- [x] Re-running `src/build_period_report.py` twice produces an
       identical file (same idempotency bar as every other report in
       this project).
-- [ ] The report contains no unexplained internal table/column names
+- [x] The report contains no unexplained internal table/column names
       (`recon_mismatch`, `stg_gl`, etc.) outside of an explicit
       "technical references" footer, since issue #9 requires it to stand
       alone for a non-technical reader.
@@ -132,20 +132,47 @@ every check this project runs, but rests on a known, unresolved
 
 **Before the output is used (sign-off = closing #9):**
 
-- **the actual decision this ticket exists for**: does finance sign
-  `reports/period_2024-01.md` given the known `local_amount` defect?
-  Candidates, not a recommendation:
-  1. Sign with an explicit caveat: the reconciliation (stg vs fact) is
-     accepted as clean; the reported dollar total is explicitly flagged
-     as unverified pending #13, not represented as final.
-  2. Withhold sign-off until #13 resolves or a corrected total exists,
-     even though every automated check in this project passes.
-  3. Something else - a partial sign-off, a different scope carve-out,
-     etc.
-- once a decision is made, closing issue #9 with that decision recorded
-  in the comment is what "closed period" means for 2024-01
-  (docs/definitions.md)
+**Ruled: neither candidate (1) nor (2) as originally framed. A third,
+split sign-off** - the reconciliation and the reported total are two
+different questions, and this period answers them differently:
+
+- **Signed**: the `stg_gl` vs `fact_gl_line` reconciliation. 0.00 gap,
+  500/502 accounts match exactly, 0% unknown. The 1 unbalanced document
+  is correctly excluded; the remaining debit/credit gap for the whole
+  period is 90.00 - not local_amount, debit/credit, the reliable axis.
+- **Not signed**: the reported `local_amount` total. The 97,144,587.1
+  figure from the 20 broadcast-defect documents is not represented as
+  final or verified anywhere in the report.
+- Candidate (1)'s "sign with an explicit caveat" phrasing was rejected
+  outright, not softened: a caveat invites a reader to drop the
+  qualifier and treat the number as accepted. Candidate (2)'s "withhold
+  the whole report" was also rejected: the automated gate genuinely
+  passed, the load isn't broken, and folding the source-data question
+  into this report would blur #13's scope into #6/#8's.
+- The report is a **working paper**, not a closed-period deliverable, by
+  design: it makes clear what's usable for period judgement (debit/credit)
+  and what isn't (the local_amount total) until #13 resolves.
+- Closing issue #9 records this split, not a blanket accept or reject.
 
 ## Retro
 
-Filled after the mission closes.
+The sign-off question this mission was built around resolved to
+"neither of the two options I proposed" - both were too coarse. The real
+answer needed a third axis I hadn't built into the mission's own
+Human-approvals framing: a report can accept a *process* (the
+reconciliation) while explicitly not accepting a *number* (the reported
+total) the same process produces. Offering only "sign" or "withhold" as
+candidates missed that these were two different questions wearing one
+label.
+
+Durable rule this adds, matching #6/#7/#8's recurring lesson from this
+same project: **when a deliverable bundles a verified process with an
+unverified number the process happens to compute, say so as two
+separate lines, not one blended verdict.** `reports/period_2024-01.md`'s
+"Reconciliation: accepted / Reported local_amount total: not signed"
+block is the concrete pattern; worth reusing verbatim in #10's and later
+periods' reports rather than re-deriving it each time.
+
+Verified: two consecutive runs of `src/build_period_report.py` produced
+a byte-identical `reports/period_2024-01.md`. 53/53 regression checks
+green.
