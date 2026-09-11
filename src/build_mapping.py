@@ -19,13 +19,12 @@ SCOPE = "company_code = 1000 AND fiscal_year = 2024 AND fiscal_period IN (1,2,3)
 MAP_CSV = REPO_ROOT / "map_account.csv"
 REPORT_MD = REPO_ROOT / "docs" / "mapping-review.md"
 
-# --- Hand-ruled accounts ----------------------------------------------------
-# These three sets come from a human ruling on issue #3, not automated
-# detection. A class-name pattern match (ILIKE '%suspense%clearing%') found
-# these 7 codes as candidates; which of them are single-purpose clearing
-# accounts versus cross-scope catch-all codes, and what each one's
-# target_account and status should be, was a business call, not something
-# derivable from the data alone. See ADR-0005 and docs/definitions.md.
+# Hand-ruled accounts: these three sets come from a human ruling on issue
+# #3, not automated detection. A class-name pattern match found these 7
+# codes as candidates; which of them are single-purpose clearing accounts
+# versus cross-scope catch-all codes, and what each one's target_account
+# and status should be, was a business call. See ADR-0005 and
+# docs/definitions.md.
 
 # Single-purpose clearing/suspense accounts: real accounts, still live, kept
 # in the target CoA under their own code (not rolled into account_class,

@@ -1,29 +1,15 @@
-"""Account-level reconciliation. Ticket 6 / Mission 06, parameterized by
-period in Ticket 10 / Mission 10.
+"""Account-level reconciliation. Ticket 6, parameterized by period in
+ticket 10.
 
 Builds recon_period_summary: one row per (gl_account, fiscal_year,
-fiscal_period) for whichever periods are being rebuilt, comparing stg_gl
-to fact_gl_line. Separate columns for the real gap (debit vs credit,
-which stays clean) and the known-broken one (local_amount, per mission
-06's exploration) - a single net column would show the same distortion
-the mission exists to explain, not fix.
+fiscal_period), comparing stg_gl to fact_gl_line. Separate columns for
+the debit/credit gap (clean) and the local_amount gap (known-broken,
+see issue #13) - a single net column would hide that distortion.
 
-This script never touches local_amount. It reports on the defect found
-in mission 06 (and confirmed systemic across periods in mission 10); the
-fix, if any, belongs to the source-data ticket that finding opened
-(#13), not here.
-
-Deletes and rebuilds ONLY the periods passed in - never the whole table.
-Mission 10 found the earlier CREATE OR REPLACE TABLE version would have
-silently wiped every already-built period's rows the moment a second
-period was loaded. Two ways to call this:
-  - build_recon_period_summary(con, periods=[(1000, 2024, 1)]) rebuilds
-    just that one period, leaving every other period's rows untouched.
-  - build_recon_period_summary(con) with no periods rebuilds for every
-    period currently present in fact_gl_line (queried, not a separately
-    maintained list) - the "whole-set summary" mode.
-Both delete only the periods they are about to re-insert; neither ever
-issues a bare DELETE/CREATE OR REPLACE against the full table.
+Rebuild modes: build_recon_period_summary(con, periods=[...]) rewrites
+only those periods; build_recon_period_summary(con) with no periods
+rewrites every period currently in fact_gl_line. Neither ever issues a
+bare DELETE/CREATE OR REPLACE against the full table (see mission 10).
 
 Run: python src/reconcile_account.py [<company_code> <fiscal_year> <fiscal_period> ...]
   no args: rebuild for every period currently in fact_gl_line

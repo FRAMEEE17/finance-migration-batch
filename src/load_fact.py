@@ -1,27 +1,9 @@
-"""Idempotent period loader. Ticket 4 / Mission 04, gated by Ticket 5 /
-Mission 05, parameterized by period in Ticket 10 / Mission 10.
+"""Idempotent period loader. Ticket 4, gated by ticket 5, parameterized
+by period in ticket 10.
 
-Loads stg_gl -> fact_gl_line for one company + period. Replaces the whole
-period every run: delete this period's rows, re-insert, one transaction.
-Two runs back to back give the same row count, distinct document count,
-and SUM(local_amount).
-
-No default period. Loading a period is a decision, not a fallback - a
-call with nothing specified fails loudly rather than silently loading
-2024-01 (mission 10's rule, after finding reconcile_account.py/
-reconcile_mismatch.py could have silently wiped other periods the same
-way).
-
-Every row is checked by src/quality_gate.py before this insert runs.
-Blocking findings (unbalanced_document, duplicate_source, map_fanout,
-null_key_column, unmapped_doc_type) never reach fact_gl_line; the reason
-is in dq_violations, not silently dropped. Non-blocking findings
-(local_amount_imbalance, unmapped_account, catch_all_account) still load
-normally, just get logged alongside.
-
-What stays in fact_gl_line but flagged, not excluded:
-  - is_opening_balance / is_closing_entry: real rows, just not part of
-    the in-period close total (docs/business-rules.md)
+Loads stg_gl -> fact_gl_line for one company + period(s), one delete +
+insert transaction per period. No default period: a bare call fails
+with a usage message rather than silently loading one.
 
 Run: python src/load_fact.py <company_code> <fiscal_year> <fiscal_period> [<fiscal_period> ...]
   e.g. python src/load_fact.py 1000 2024 1 2 3
@@ -112,6 +94,8 @@ def load_period(con, company_code: int, fiscal_year: int, fiscal_period: int) ->
             FROM stg_gl s
             LEFT JOIN map_account m ON m.source_account = s.gl_account
             WHERE {pf}
+              -- only blocking dq_violations exclude a row; non-blocking
+              -- findings still load, just get logged alongside
               AND NOT EXISTS (
                   SELECT 1 FROM dq_violations v
                   WHERE v.blocking = true

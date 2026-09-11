@@ -1,17 +1,8 @@
-"""Regression checks. Run after every ticket. Every check stays green.
+"""Regression checks. Run after every ticket: python src/checks.py
 
-    python src/checks.py
-
-Add one check per acceptance criterion as tickets land. Keep each check
-deterministic: it computes a value and compares it, no judgement.
-
-Every check function shares one contract: takes the DuckDB connection
-`con`, returns `(ok: bool, detail: str)`. `ok` is what main() uses to
-decide pass/fail; `detail` is what gets printed either way, so it should
-say what was actually measured, not just "passed"/"failed". Inside a
-check, `got` is the real value read from the database, `want` is what it
-should be, `bad` is a count of rows/accounts that violate the rule -
-consistent names across every check below, not restated per function.
+One check per acceptance criterion, deterministic. Each function takes
+`con`, returns `(ok: bool, detail: str)`. Naming convention: `got` is
+the measured value, `want` the expected one, `bad` a violation count.
 """
 
 import csv
@@ -46,7 +37,7 @@ def _schema(con: duckdb.DuckDBPyConnection, relation: str) -> list[tuple[str, st
     return [(r[0], r[1]) for r in con.execute(f"DESCRIBE {relation}").fetchall()]
 
 
-# --- Ticket 2: stg_gl loaded as-is ----------------------------------------
+# Ticket 2: stg_gl loaded as-is
 
 def stg_gl_exists(con):
     return "stg_gl" in _tables(con), "table present"
@@ -69,7 +60,7 @@ def stg_gl_document_count_stable(con):
     return got == 174_944, f"distinct document_id = {got:,} (anchor 174,944)"
 
 
-# --- Ticket 3: mapping -----------------------------------------------------
+# Ticket 3: mapping
 
 def _map_rows():
     with open(MAP_CSV, newline="") as f:
@@ -198,7 +189,7 @@ def fraud_anomaly_accounts_not_excluded(con):
     return not missing, f"{len(missing)} flagged-row accounts missing from map_account.csv" if missing else f"{len(with_flags)} flagged-row accounts present"
 
 
-# --- Ticket 4: idempotent loader ----------------------------------------
+# Ticket 4: idempotent loader
 
 def fact_gl_line_scope_only(con):
     """fact_gl_line no longer means "just P01" (ticket 10 parameterized
@@ -288,7 +279,7 @@ def unmapped_doc_type_synthetic_reject(con):
     return passed == 0, "synthetic unknown document_type correctly excluded" if passed == 0 else "guard failed to exclude it"
 
 
-# --- Ticket 5: quality gate + dq_violations -------------------------------
+# Ticket 5: quality gate + dq_violations
 
 def dq_violations_exists(con):
     return "dq_violations" in _tables(con), "table present"
@@ -395,7 +386,7 @@ def gate_never_filters_on_flags(con):
     return not bad, "quality_gate.py never references is_fraud/is_anomaly" if not bad else "found a reference, review it"
 
 
-# --- Ticket 6: account-level reconciliation --------------------------------
+# Ticket 6: account-level reconciliation
 
 def recon_period_summary_row_count(con):
     """recon_period_summary is one row per (gl_account, fiscal_year,
@@ -451,7 +442,7 @@ def recon_imbalanced_total_matches_known_finding(con):
     return abs(got - want) < 0.5, f"sum(imbalanced_local_amount) P01={got}  want={want}"
 
 
-# --- Ticket 7: reversal-pair detection --------------------------------------
+# Ticket 7: reversal-pair detection
 
 def reversal_pairs_row_count(con):
     got = con.execute("SELECT COUNT(*) FROM recon_reversal_pairs").fetchone()[0]
@@ -536,7 +527,7 @@ def reversal_synthetic_duplicate_and_self_reversal_reject(con):
     return ok, f"duplicate collapses to {dup_collapsed} row (want 1), self-reversal detected {self_reversal_rejected} time(s) (want 1, to be excluded upstream)"
 
 
-# --- Ticket 8: document-level reconciliation with bucket + cause -----------
+# Ticket 8: document-level reconciliation with bucket + cause
 
 VALID_BUCKETS = ("missing_in_fact", "missing_in_stg", "amount_changed", "intentionally_excluded")
 VALID_CAUSES = (
@@ -676,7 +667,7 @@ def mismatch_pair_enrichment_never_changes_bucket(con):
     return bad == 0, f"{bad} rows where pair membership leaked into bucket/cause"
 
 
-# --- Ticket 9: period report for finance sign-off ---------------------------
+# Ticket 9: period report for finance sign-off
 
 def period_report_exists(con):
     missing = [
@@ -764,7 +755,7 @@ def period_report_idempotent_rebuild(con):
     return not changed, "all 3 reports identical after rebuild" if not changed else f"rebuild changed: {changed}"
 
 
-# --- Ticket 10: backfill 2024-02 and 2024-03 --------------------------------
+# Ticket 10: backfill 2024-02 and 2024-03
 
 def p01_unchanged_after_backfill(con):
     """P01's fact_gl_line row count, document count, and SUM(local_amount)

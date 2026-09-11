@@ -1,43 +1,10 @@
-"""Reversal-pair detection. Ticket 7 / Mission 07.
+"""Reversal-pair detection. Ticket 7.
 
-Detects reversal documents by text convention and links each to its
-original. No status column exists for this (ADR-0004): reference starts
-'REV-<uuid>', header_text reads "Reversal of <uuid>". This rule breaks if
-that wording changes upstream - if reversal counts drop to zero after a
-data refresh, check the convention before assuming there are no
-reversals that period (ADR-0004).
-
-Scope: company 1000, FY2024, any pair where the original OR the reversal
-falls in P01-P03 (mission 06's mapping scope). Not tied to fact_gl_line,
-which only covers P01 so far - this reads stg_gl directly. A pair stays
-in scope even when its other side lands outside P01-P03 (mission 07's
-exploration found 126 such pairs, original in scope, reversal in P04);
-narrowing to "both sides in scope" would silently drop the reversal side
-of a real pair.
-
-is_net_zero is decided on debit_amount/credit_amount, not local_amount.
-Every document, original or reversal, already sums its own local_amount
-to ~0 by construction (debit lines positive, credit lines negative,
-cancelling within that one document) - comparing two already-zero
-document totals proves nothing about whether a reversal actually offsets
-its original. The real signal is whether debit and credit SWAP between
-the two documents (original's debit total equals the reversal's credit
-total, and vice versa). local_amount carries a second, separate defect
-on reversal documents: it is copied verbatim from the original instead
-of being re-signed, so for a textbook-valid pair, summing local_amount
-per account doubles the figure instead of cancelling it. The raw
-local_amount columns are kept here for visibility, not as the net-zero
-signal.
-
-is_swap_valid is false for 85 of 1025 pairs in this scope: the text
-convention matches (real REV- reference, real "Reversal of <id>" wording)
-but the amounts and line counts don't correspond to the claimed original
-at all. 83 of those 85 carry an is_fraud or is_anomaly flag - this reads
-as a planted fake-reversal anomaly, not a real reversal gone wrong. Kept
-as a row, flagged, never filtered (ADR-0003): the text convention
-matched, so ADR-0004's detection rule says this is a reversal pair.
-Whether it's economically valid is a different question, answered by
-is_swap_valid, not by omission from this table.
+Detects reversal documents by text convention (ADR-0004, no status
+column exists): reference starts 'REV-<uuid>', header_text reads
+"Reversal of <uuid>". Scope: company 1000, FY2024, any pair where either
+side falls in P01-P03 - reads stg_gl directly, not fact_gl_line, so a
+pair stays in scope even when its other side doesn't (mission 07).
 
 Run: python src/reconcile_reversals.py
 """
@@ -87,8 +54,15 @@ def build_recon_reversal_pairs(con) -> int:
             (o.fiscal_year != v.fiscal_year OR o.fiscal_period != v.fiscal_period) AS cross_period,
             o.debit_total AS original_debit_total, o.credit_total AS original_credit_total,
             v.debit_total AS reversal_debit_total, v.credit_total AS reversal_credit_total,
+            -- Decided on debit/credit swapping between the two documents,
+            -- not local_amount: every document already sums its own
+            -- local_amount to ~0 by construction, so comparing two
+            -- already-zero totals proves nothing about a real reversal.
             ABS(o.debit_total - v.credit_total) <= {SWAP_TOLERANCE}
                 AND ABS(o.credit_total - v.debit_total) <= {SWAP_TOLERANCE} AS is_net_zero,
+            -- local_amount is copied verbatim onto the reversal instead of
+            -- re-signed, so summing it per account doubles a valid pair's
+            -- figure instead of cancelling it. Kept for visibility only.
             o.local_total AS original_local_amount, v.local_total AS reversal_local_amount,
             ROUND(o.local_total + v.local_total, 2) AS net_local_amount,
             (o.any_fraud OR o.any_anomaly OR v.any_fraud OR v.any_anomaly) AS any_flagged

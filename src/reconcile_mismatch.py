@@ -1,43 +1,31 @@
-"""Document-level reconciliation with bucket + cause. Ticket 8 / Mission
-08, parameterized by period in Ticket 10 / Mission 10.
+"""Document-level reconciliation with bucket + cause. Ticket 8,
+parameterized by period in ticket 10.
 
-Builds recon_mismatch: one row per grain-level difference between stg_gl
-and the close-eligible subset of fact_gl_line (excludes rows flagged
-is_opening_balance / is_closing_entry / is_post_close - the ones
-business-rules.md says are "never mixed into in-period totals"). A plain
-row-for-row join against the full fact_gl_line table only ever produces
-missing_in_fact, since those three flags load and flag a row rather than
-excluding it from the table (mission 04's decision); comparing against
-the close-eligible subset instead is what gives every bucket real
-content (mission 08's Exploration).
+Builds recon_mismatch: stg_gl vs the close-eligible subset of
+fact_gl_line (excludes is_opening_balance / is_closing_entry /
+is_post_close rows - comparing against the full table would only ever
+produce missing_in_fact, since those flags load a row rather than
+excluding it).
 
 Bucket assignment:
-  - missing_in_fact: in stg_gl, absent from fact_gl_line entirely (not
-    just excluded from the close-eligible view). Cause comes from
-    dq_violations (the blocking check that rejected it).
-  - intentionally_excluded: in stg_gl, present in fact_gl_line, but
-    flagged out of the close-eligible view. Cause is whichever flag is
-    set (opening_balance / closing_entry / post_close).
-  - amount_changed: present in both, close-eligible, but local_amount
+  - missing_in_fact: in stg_gl, absent from fact_gl_line. Cause comes
+    from the dq_violations check that rejected it.
+  - intentionally_excluded: present in fact_gl_line but flagged out of
+    the close-eligible view. Cause is whichever flag is set.
+  - amount_changed: present in both, close-eligible, local_amount
     differs by more than 0.01.
   - missing_in_stg: in fact_gl_line, absent from stg_gl. Should never
-    happen (fact_gl_line is built as a filtered subset of stg_gl); kept
-    as a guard, not expected to ever hold a row.
-  - matched (not a mismatch, no row in recon_mismatch): present in both,
-    close-eligible, gap within 0.01.
+    happen; kept as a guard.
+  - matched: not written as a row. Present in both, gap within 0.01.
 
-reversal_pair is not a bucket this mission assigns. A reversal pair
-whose stg_gl and fact_gl_line agree is matched, full stop - #8 answers
-why a row doesn't compare equal in the close-eligible set, not what a
-transaction means economically. pair_id / is_swap_valid are attached to
-every recon_mismatch row as informational attributes (nullable, from
-recon_reversal_pairs) so a reader can see a mismatched row is also part
-of a detected pair, without that fact changing its bucket or cause.
+reversal_pair is not a bucket here - a reversal pair whose stg_gl and
+fact_gl_line agree is matched, full stop. pair_id / is_swap_valid attach
+to a matching row as informational attributes only, never changing its
+bucket or cause.
 
-Deletes and rebuilds ONLY the periods passed in - same rule as
-src/reconcile_account.py (mission 10): a bare DELETE/CREATE OR REPLACE
-against the full table would silently wipe every other period's already-
-classified rows the moment a second period is processed.
+Rebuild modes match reconcile_account.py: an explicit period list
+rewrites only those periods, no args rewrites every period currently in
+fact_gl_line, never a bare DELETE/CREATE OR REPLACE on the full table.
 
 Run: python src/reconcile_mismatch.py [<company_code> <fiscal_year> <fiscal_period> ...]
   no args: rebuild for every period currently in fact_gl_line

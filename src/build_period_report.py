@@ -1,32 +1,11 @@
-"""Period report for finance sign-off. Ticket 9 / Mission 09,
-parameterized by period in Ticket 10 / Mission 10.
+"""Period report for finance sign-off. Ticket 9, parameterized by period
+in ticket 10.
 
-Writes reports/period_<year>-<period>.md from the warehouse tables built
-by tickets 5-8 (dq_violations, recon_period_summary, recon_mismatch,
-recon_reversal_pairs). No new computation happens here; this script only
-assembles and formats numbers those tables already hold, filtered to the
-one period being reported.
-
-The sign-off in this report is split into two pieces on purpose, per the
-human ruling on mission 09 (and reaffirmed unchanged for every period in
-mission 10):
-  - the stg_gl vs fact_gl_line reconciliation is accepted (clean by every
-    check this project runs)
-  - the reported local_amount total is NOT signed (it inherits a known
-    source-data defect, mission 06 / issue #13, confirmed systemic across
-    P01-P03 in mission 10, and both sides of the comparison carry the
-    same broken numbers, so a clean reconciliation here doesn't mean the
-    total is correct)
-Never write "verified close" or "final" anywhere in this report about
-the local_amount total - that phrasing is exactly what a reader would
-mistake for a signed number.
-
-recon_reversal_pairs is scoped to pairs whose ORIGINAL document posted in
-the period being reported (not the reversal's period, and not the whole
-P01-P03 table) - this is the one table that isn't naturally one-row-per-
-period, and "reversals initiated this period" is the partition that adds
-up to the whole table across all three periods without double-counting
-(mission 10's exploration: 337 + 356 + 332 = 1,025).
+Assembles reports/period_<year>-<period>.md from warehouse tables built
+by tickets 5-8; no new computation happens here. Sign-off is split in
+two: the stg_gl vs fact_gl_line reconciliation is accepted, but the
+reported local_amount total is not signed (issue #13). Never describe
+local_amount as "verified" or "final" in the output - see ADR-0006/0007.
 
 Run: python src/build_period_report.py <company_code> <fiscal_year> <fiscal_period>
   e.g. python src/build_period_report.py 1000 2024 2
@@ -119,6 +98,9 @@ def _fetch(con, company_code: int, fiscal_year: int, fiscal_period: int) -> dict
         SELECT ROUND(100.0 * SUM((cause = 'unknown')::int) / COUNT(*), 1) FROM recon_mismatch WHERE {pf}
     """).fetchone()[0] or 0.0
 
+    # Scoped by the original document's period, not the reversal's - a pair
+    # can cross a period boundary, and "originated this period" is what
+    # sums to the whole table across all periods without double-counting.
     reversal = con.execute(f"""
         SELECT COUNT(*), SUM(cross_period::int), SUM(is_net_zero::int), SUM((NOT is_net_zero)::int)
         FROM recon_reversal_pairs
