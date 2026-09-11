@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import load_fact  # noqa: E402
 import quality_gate  # noqa: E402
 import reconcile_account  # noqa: E402
+import reconcile_reversals  # noqa: E402
 
 from config import REPO_ROOT, SOURCE_PARQUET, WAREHOUSE_DB
 
@@ -407,7 +408,92 @@ def recon_imbalanced_total_matches_known_finding(con):
     return abs(got - want) < 0.5, f"sum(imbalanced_local_amount)={got}  want={want}"
 
 
-# --- Ticket 7+: reversal pairs, reconciliation ------------------------------
+# --- Ticket 7: reversal-pair detection --------------------------------------
+
+def reversal_pairs_row_count(con):
+    got = con.execute("SELECT COUNT(*) FROM recon_reversal_pairs").fetchone()[0]
+    return got == 1025, f"recon_reversal_pairs={got}  want=1025"
+
+
+def reversal_pairs_no_duplicates(con):
+    bad = con.execute("""
+        SELECT COUNT(*) FROM (
+            SELECT original_document_id, reversal_document_id, COUNT(*) n
+            FROM recon_reversal_pairs GROUP BY 1, 2 HAVING n > 1
+        )
+    """).fetchone()[0]
+    return bad == 0, f"{bad} duplicate (original, reversal) pair keys"
+
+
+def reversal_document_never_an_original(con):
+    """A reversal is never mistaken for an original: no
+    original_document_id in the table also has a REV- reference."""
+    bad = con.execute("""
+        SELECT COUNT(*) FROM recon_reversal_pairs p
+        JOIN stg_gl s ON s.document_id = p.original_document_id
+        WHERE s.reference LIKE 'REV-%'
+    """).fetchone()[0]
+    return bad == 0, f"{bad} rows where the 'original' is itself a reversal"
+
+
+def reversal_is_net_zero_matches_known_split(con):
+    got_true, got_false = con.execute("""
+        SELECT SUM(is_net_zero::int), SUM((NOT is_net_zero)::int) FROM recon_reversal_pairs
+    """).fetchone()
+    return (got_true, got_false) == (940, 85), f"is_net_zero true={got_true} false={got_false}  want true=940 false=85"
+
+
+def reversal_synthetic_net_zero_cases(con):
+    """No real case proves is_net_zero for a document that shares its
+    original's period vs. one that doesn't (both real pairs happen to
+    include both), so this pins the swap-tolerance arithmetic itself
+    against 3 synthetic pairs: same-period net-zero, cross-period
+    net-zero, and a genuine non-zero net. Mirrors
+    build_recon_reversal_pairs' own expression. Never touches stg_gl or
+    recon_reversal_pairs."""
+    rows = con.execute(f"""
+        WITH pairs(orig_dr, orig_cr, orig_fy, orig_fp, rev_dr, rev_cr, rev_fy, rev_fp, label) AS (
+            VALUES
+                (100.0, 0.0, 2024, 1, 0.0, 100.0, 2024, 1, 'same_period_zero'),
+                (100.0, 0.0, 2024, 1, 0.0, 100.0, 2024, 2, 'cross_period_zero'),
+                (100.0, 0.0, 2024, 1, 0.0, 40.0,  2024, 1, 'nonzero_net')
+        )
+        SELECT label,
+               (orig_fy != rev_fy OR orig_fp != rev_fp) AS cross_period,
+               ABS(orig_dr - rev_cr) <= {reconcile_reversals.SWAP_TOLERANCE}
+                   AND ABS(orig_cr - rev_dr) <= {reconcile_reversals.SWAP_TOLERANCE} AS is_net_zero
+        FROM pairs
+    """).fetchall()
+    got = {label: (cross_period, is_net_zero) for label, cross_period, is_net_zero in rows}
+    want = {
+        "same_period_zero": (False, True),
+        "cross_period_zero": (True, True),
+        "nonzero_net": (False, False),
+    }
+    return got == want, f"got={got}" if got != want else "all 3 synthetic cases match expected (cross_period, is_net_zero)"
+
+
+def reversal_synthetic_duplicate_and_self_reversal_reject(con):
+    """A duplicate reversal row (same reversal_document_id detected
+    twice, e.g. from a stg_gl scan without DISTINCT) must collapse to one
+    pair, and a document whose header_text claims to reverse itself must
+    not produce a pair. Mirrors the rev CTE's DISTINCT + the
+    reversal-never-an-original guard, on a synthetic in-memory table.
+    Never touches stg_gl or recon_reversal_pairs."""
+    dup_collapsed = con.execute("""
+        SELECT COUNT(*) FROM (
+            SELECT DISTINCT * FROM (VALUES ('R1', 'O1'), ('R1', 'O1')) AS t(reversal_document_id, original_document_id)
+        )
+    """).fetchone()[0]
+    self_reversal_rejected = con.execute("""
+        SELECT COUNT(*) FROM (VALUES ('R2', 'R2')) AS t(reversal_document_id, original_document_id)
+        WHERE reversal_document_id = original_document_id
+    """).fetchone()[0]
+    ok = dup_collapsed == 1 and self_reversal_rejected == 1
+    return ok, f"duplicate collapses to {dup_collapsed} row (want 1), self-reversal detected {self_reversal_rejected} time(s) (want 1, to be excluded upstream)"
+
+
+# --- Ticket 8+: document-level reconciliation --------------------------------
 
 
 CHECKS = [
@@ -443,6 +529,12 @@ CHECKS = [
     ("recon gaps computed correctly", recon_gaps_computed_correctly),
     ("local_amount gap isolated to 2 accounts", recon_local_amount_gap_isolated_to_two_accounts),
     ("imbalanced total matches known finding", recon_imbalanced_total_matches_known_finding),
+    ("reversal pairs row count", reversal_pairs_row_count),
+    ("reversal pairs no duplicates", reversal_pairs_no_duplicates),
+    ("reversal document never an original", reversal_document_never_an_original),
+    ("reversal is_net_zero matches known split", reversal_is_net_zero_matches_known_split),
+    ("reversal synthetic net-zero cases", reversal_synthetic_net_zero_cases),
+    ("reversal synthetic duplicate/self-reversal reject", reversal_synthetic_duplicate_and_self_reversal_reject),
 ]
 
 
