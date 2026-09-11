@@ -87,11 +87,19 @@ def map_account_source_unique(con):
 
 
 def map_account_covers_scope(con):
+    """Every account that appears in scope must have a row in
+    map_account.csv - coverage, not exact equality (ADR-0007). The CSV
+    can carry extra codes beyond scope (e.g. an out-of-scope clearing-pair
+    partner added by hand, same family as an in-scope pair) without that
+    counting as a violation; a scope account missing from the CSV always
+    does."""
     scope_accounts = {
         str(r[0]) for r in con.execute(f"SELECT DISTINCT gl_account FROM stg_gl WHERE {SCOPE}").fetchall()
     }
     csv_accounts = {r["source_account"] for r in _map_rows()}
-    return scope_accounts == csv_accounts, f"scope={len(scope_accounts)}  csv={len(csv_accounts)}"
+    missing = scope_accounts - csv_accounts
+    extra = csv_accounts - scope_accounts
+    return not missing, f"scope={len(scope_accounts)}  csv={len(csv_accounts)}  missing_from_csv={len(missing)}  extra_in_csv={len(extra)}"
 
 
 MAP_ACCOUNT_STATUSES = ("mapped", "unmapped", "deprecated", "catch_all")  # ADR-0005
@@ -117,6 +125,18 @@ def map_account_target_consistent_with_status(con):
         elif r["status"] == "deprecated" and r["source_usage"] == "live" and not has_target:
             bad.append(r)
     return not bad, f"{len(bad)} rows where target presence disagrees with status" if bad else "consistent"
+
+
+def local_amount_expected_matches_clearing_pairs(con):
+    """local_amount_expected=false exactly on the 4 clearing-pair accounts
+    (ADR-0007) - every other row, including the 2 catch-all accounts and
+    the 2 single-purpose clearing accounts, expects a real local_amount."""
+    rows = _map_rows()
+    bad = [
+        r for r in rows
+        if (r["local_amount_expected"] == "false") != (r["account_role"] == "clearing_pair")
+    ]
+    return not bad, f"{len(bad)} rows where local_amount_expected disagrees with account_role=clearing_pair" if bad else "consistent, 8 clearing-pair accounts"
 
 
 def catch_all_always_flagged(con):
@@ -795,6 +815,7 @@ CHECKS = [
     ("map_account.csv target/status consistent", map_account_target_consistent_with_status),
     ("catch_all accounts always flagged", catch_all_always_flagged),
     ("clearing pairs complete", clearing_pairs_complete),
+    ("local_amount_expected matches clearing pairs", local_amount_expected_matches_clearing_pairs),
     ("dim_account row count == distinct gl_account", dim_account_row_count),
     ("gl_account -> account_class is 1:1", gl_account_to_class_is_1to1),
     ("fraud/anomaly accounts not excluded", fraud_anomaly_accounts_not_excluded),

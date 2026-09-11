@@ -47,8 +47,8 @@ Real, single-purpose clearing/suspense accounts. All confirmed `source_usage=liv
 | `199000` | Suspense Clearing | 30 | 435,492 |
 | `199300` | Intercompany Clearing | 218 | 6,690,828 |
 
-## 3. Clearing pairs (`status=unmapped`, `account_role=clearing_pair`, `dq_flag=local_amount_zero_but_dr_cr_nonzero`)
-Debit-only / credit-only pairs. `local_amount` is 0 on every row for all six despite real debit/credit activity below. Do not read this set as immaterial from `local_amount` alone. Filed against issue #5. Stay `unmapped` until a human names the real pair target; never map one side without the other.
+## 3. Clearing pairs (`status=unmapped`, `account_role=clearing_pair`, `dq_flag=local_amount_zero_but_dr_cr_nonzero`, `local_amount_expected=false`)
+Debit-only / credit-only pairs. `local_amount` is 0 on every row for all eight despite real debit/credit activity below. Do not read this set as immaterial from `local_amount` alone - see ADR-0007. Stay `unmapped` until a human names the real pair target; never map one side without the other.
 
 | gl_account | sum debit | sum credit | lines |
 |---|---|---|---|
@@ -58,6 +58,8 @@ Debit-only / credit-only pairs. `local_amount` is 0 on every row for all six des
 | `205020` | 0 | 1,622,855 | 8 |
 | `205021` | 0 | 1,786,440 | 7 |
 | `205030` | 0 | 980,588 | 9 |
+
+A 4th pair, `115010`/`205010`, has the identical signature (confirmed dataset-wide in mission 14) but zero rows in company 1000 - only companies 2000/2100/3000 - so it never appears in the table above (which is scope-filtered) even though it's in `map_account.csv` with the same tags as the other three pairs.
 
 ## 4. Catch-all accounts (`status=catch_all`, ADR-0005)
 Migration parking codes, not real accounts: many unrelated `account_description` values on the same code, active across all 4 companies and 13 periods in the full source (see ADR-0005). Each keeps its own code as `target_account` and reports on its own line, never merged with the other even though both fall under `account_class` `A.X`. Within the current scope they land in different `financial_statement_category` values and folding them together would misclassify one of them. `fs_category_flag` is forced true for both, and both are excluded from section 5's `A.X` vote.

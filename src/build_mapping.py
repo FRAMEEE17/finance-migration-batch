@@ -8,6 +8,7 @@ sets below. Human approves before use.
 Run: python src/build_mapping.py
 """
 
+import csv
 import sys
 
 import duckdb  # type: ignore
@@ -31,11 +32,22 @@ REPORT_MD = REPO_ROOT / "docs" / "mapping-review.md"
 # which would misfile them into a rollup group they don't belong to).
 CLEARING_ACCOUNTS = {9000, 9100, 9300, 199000, 199300}
 
-# Debit-only / credit-only pairs. local_amount is 0 on every row for all six
-# despite real debit_amount / credit_amount activity (dq_flag below). Stay
-# unmapped until a human names the real pair target; never map one side
-# without the other.
-CLEARING_PAIRS = [(115020, 205020), (115021, 205021), (115030, 205030)]
+# Debit-only / credit-only pairs. local_amount is 0 on every row for all
+# eight despite real debit_amount / credit_amount activity (dq_flag below).
+# Stay unmapped until a human names the real pair target; never map one side
+# without the other. See ADR-0007 for the local_amount_expected=false
+# ruling (mission 14 / issue #14, not ticket 3 - the 4th pair was found by
+# a whole-file investigation ticket 3 never had scope to run).
+CLEARING_PAIRS = [(115010, 205010), (115020, 205020), (115021, 205021), (115030, 205030)]
+
+# 115010/205010 have zero rows in company 1000 - only companies 2000/2100/
+# 3000 - so dim_account (scope-derived) never surfaces them the way the
+# other 3 pairs are. Same family, same 100% local_amount=0 signature
+# (checked dataset-wide in mission 14), added by hand here rather than
+# left silently absent from map_account.csv - a later ticket loading
+# company 2000/2100/3000 would otherwise hit this pair with no dq_flag or
+# account_role waiting for it.
+OUT_OF_SCOPE_CLEARING_PAIRS = {(115010, 205010)}
 
 # Migration catch-all codes: one gl_account absorbing unrelated postings
 # across every company and period in the source, not a real account. See
@@ -44,6 +56,13 @@ CLEARING_PAIRS = [(115020, 205020), (115021, 205021), (115030, 205030)]
 CATCH_ALL_ACCOUNTS = {199999, 999999}
 
 DQ_FLAG_PAIR = "local_amount_zero_but_dr_cr_nonzero"
+
+# Accounts where local_amount is not expected to carry a real per-line
+# value by design (ADR-0007) - every CLEARING_PAIRS account, in-scope or
+# not. Distinct from a "defect": these accounts balance on debit/credit
+# like any other, they just never populate local_amount, so any local
+# check must not read that as broken data.
+LOCAL_AMOUNT_NOT_EXPECTED = {a for pair in CLEARING_PAIRS for a in pair}
 
 
 def _markdown_table(header: list[str], rows: list[list[str]]) -> list[str]:
@@ -187,6 +206,7 @@ def draft_map_account(con) -> None:
         role = ""
         dq_flag = ""
         notes = ""
+        local_amount_expected = gl_account not in LOCAL_AMOUNT_NOT_EXPECTED
 
         if gl_account in CATCH_ALL_ACCOUNTS:
             status = "catch_all"
@@ -209,16 +229,36 @@ def draft_map_account(con) -> None:
 
         # Column order here must match the header line written just below:
         # source_account, target_account, status, source_usage,
-        # account_role, dq_flag, pair_id, notes
+        # account_role, dq_flag, pair_id, local_amount_expected, notes
         written.append((
             gl_account, target, status, usage, role, dq_flag,
-            pair_id_of.get(gl_account, ""), notes,
+            pair_id_of.get(gl_account, ""), str(local_amount_expected).lower(), notes,
         ))
 
-    with open(MAP_CSV, "w") as f:
-        f.write("source_account,target_account,status,source_usage,account_role,dq_flag,pair_id,notes\n")
-        for row in written:
-            f.write(",".join(str(v) for v in row) + "\n")
+    # OUT_OF_SCOPE_CLEARING_PAIRS never appear in dim_account (zero rows in
+    # the company 1000 scope it's built from), so they need adding by hand
+    # here rather than falling out of the scope-derived loop above.
+    for a, b in OUT_OF_SCOPE_CLEARING_PAIRS:
+        for gl_account in (a, b):
+            usage = source_usage.get(gl_account, "retired")
+            written.append((
+                gl_account, "", "unmapped", usage, "clearing_pair", DQ_FLAG_PAIR,
+                pair_id_of.get(gl_account, ""), "false",
+                "appears in companies 2000/2100/3000, not company 1000 - outside this pipeline's scope",
+            ))
+
+    written.sort(key=lambda r: r[0])
+
+    # csv.writer, not string-joining: a notes value with a comma in it
+    # (like the out-of-scope pair's note below) would otherwise silently
+    # shift every later column when the file is read back.
+    with open(MAP_CSV, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow([
+            "source_account", "target_account", "status", "source_usage",
+            "account_role", "dq_flag", "pair_id", "local_amount_expected", "notes",
+        ])
+        w.writerows(written)
 
     counts = {}
     for row in written:
@@ -343,16 +383,23 @@ def _build_report_text(groups, clearing, pairs, catch_all, dirty) -> str:
 
     lines.append(
         "\n## 3. Clearing pairs (`status=unmapped`, `account_role=clearing_pair`, "
-        f"`dq_flag={DQ_FLAG_PAIR}`)\n"
+        f"`dq_flag={DQ_FLAG_PAIR}`, `local_amount_expected=false`)\n"
         "Debit-only / credit-only pairs. `local_amount` is 0 on every row for "
-        "all six despite real debit/credit activity below. Do not read this "
-        "set as immaterial from `local_amount` alone. Filed against issue #5. "
-        "Stay `unmapped` until a human names the real pair target; never map "
+        "all eight despite real debit/credit activity below. Do not read this "
+        "set as immaterial from `local_amount` alone - see ADR-0007. Stay "
+        "`unmapped` until a human names the real pair target; never map "
         "one side without the other.\n"
     )
     lines += _markdown_table(
         ["gl_account", "sum debit", "sum credit", "lines"],
         [[f"`{acc}`", f"{dr:,.0f}", f"{cr:,.0f}", str(ln)] for acc, dr, cr, ln in pairs],
+    )
+    lines.append(
+        "\nA 4th pair, `115010`/`205010`, has the identical signature "
+        "(confirmed dataset-wide in mission 14) but zero rows in company "
+        "1000 - only companies 2000/2100/3000 - so it never appears in the "
+        "table above (which is scope-filtered) even though it's in "
+        "`map_account.csv` with the same tags as the other three pairs."
     )
 
     lines.append(

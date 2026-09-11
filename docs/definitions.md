@@ -194,8 +194,8 @@ source hierarchy at `account_class` grain (~27 rows, rolled up from 505
 `gl_account` values via `account_sub_class → account_class`).
 
 `map_account.csv` columns: `source_account, target_account, status,
-source_usage, account_role, dq_flag, pair_id, notes`. A human approves this
-file. No target code is invented.
+source_usage, account_role, dq_flag, pair_id, local_amount_expected,
+notes`. A human approves this file. No target code is invented.
 
 `unmapped_account` means a `gl_account` not present in `map_account.csv`,
 present with `status='unmapped'`, or present with `status='deprecated'`
@@ -252,15 +252,31 @@ sense read together, see `pair_id`). Blank for an ordinary account.
 visible, not silently drop. `local_amount_zero_but_dr_cr_nonzero` marks a
 `gl_account` where every row's `local_amount` is 0 while `debit_amount` /
 `credit_amount` are materially nonzero. A `local_amount`-only view of
-this account is misleading. Filed against issue #5.
+this account is misleading. Filed against issue #5, root-caused and ruled
+on in mission 14 / ADR-0007: for the 4 `clearing_pair` accounts this flag
+marks, it means "by design," not "broken" - see `local_amount_expected`.
 
 **`pair_id`** links the two sides of a `clearing_pair`: same value on both
-rows (e.g. `115020_205020`). A `clearing_pair` row present without its
-other half, or with the two halves on different `status` values, is a
-validation error, not a valid state.
+rows (e.g. `115020_205010`, `115020_205020`, `115021_205021`,
+`115030_205030` - 4 pairs as of mission 14, one of them,
+`115010`/`205010`, with zero activity in company 1000 and present in the
+file only because the pattern was confirmed dataset-wide). A
+`clearing_pair` row present without its other half, or with the two
+halves on different `status` values, is a validation error, not a valid
+state.
+
+**`local_amount_expected`** is `true`/`false`. `false` exactly on the 4
+`clearing_pair` accounts (ADR-0007): `local_amount` is not expected to
+carry a real per-line value for these accounts by design, not a defect a
+future source drop is expected to fix. `true` for everything else,
+including the 2 single-purpose `clearing` accounts and both `catch_all`
+codes - a normal account with a real `local_amount` bug is still
+`local_amount_expected=true`, this field marks account nature, not data
+quality.
 
 **`notes`** is free text. Required when a `deprecated` row has no
-`target_account`, to say why.
+`target_account`, or when a row is present despite being outside the
+current company/period scope, to say why.
 
 ## "Close a period" / deliverable / tolerance
 
