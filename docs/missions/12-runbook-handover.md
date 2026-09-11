@@ -40,7 +40,7 @@ python3 src/checks.py
 ```
 
 - Wall time for the whole sequence: **2.0 seconds** (`user 5.24s, sys
-  1.57s, 339% cpu` — DuckDB parallelizes across cores). Well inside the
+  1.57s, 339% cpu` - DuckDB parallelizes across cores). Well inside the
   20-minute target; the real time cost for a newcomer is reading the
   runbook, not running it.
 - Reran `load_fact.py 1000 2024 3` three times back to back:
@@ -51,18 +51,18 @@ python3 src/checks.py
 - `src/checks.py` only imports `duckdb` and the standard library
   (`csv`, `sys`, `pathlib`). Every notebook only imports `duckdb` (plus
   `csv` in mission 05's and mission 10's). No `pandas`/`pyarrow` import
-  anywhere in `src/` or `notebooks/` — `read_parquet`/`read_csv_auto`
+  anywhere in `src/` or `notebooks/` - `read_parquet`/`read_csv_auto`
   run inside DuckDB itself. `requirements.txt` only needs to pin
   `duckdb`; `jupyter`/`nbconvert`/`ipykernel` are needed only to
   re-execute the notebooks, not to run a period.
 - `python3 --version` is 3.9.6 in this environment. Confirmed during
   ticket 10 that `X | None` (PEP 604) fails at import time on 3.9 but
-  bare `list[X]`/`dict[str, int]` (PEP 585) doesn't — worth a runbook
+  bare `list[X]`/`dict[str, int]` (PEP 585) doesn't - worth a runbook
   line since it's the one Python-version trap this repo has actually
   hit.
 - `README.md` already exists with a `## Docs` section listing
   `docs/architecture.md` (the diagram brief, `docs/architecture.png`
-  itself doesn't exist yet — issue #1) and does not yet link
+  itself doesn't exist yet - issue #1) and does not yet link
   `docs/design-patterns.md` ("the pattern notes"). Adding that link
   doesn't need to wait on #1.
 
@@ -81,19 +81,19 @@ python3 src/checks.py
   4. Reload without inflating counts: `load_fact.py` deletes then
      re-inserts only the periods passed as arguments, one transaction;
      re-running with the same arguments never appends. No default
-     period — a bare call fails with a usage message rather than
+     period - a bare call fails with a usage message rather than
      guessing.
   5. Where mismatches land: `recon_mismatch` is built from `stg_gl`
      compared against the **close-eligible** subset of `fact_gl_line`
      (excludes `is_opening_balance` / `is_closing_entry` /
-     `is_post_close` rows), not the full table — comparing against the
+     `is_post_close` rows), not the full table - comparing against the
      full table only ever produces `missing_in_fact` (mission 08).
      Every row gets one bucket + one cause from the closed lists in
      `docs/definitions.md`.
   6. Reversal pairs: detected by convention (`reference` starts
      `REV-...`), reported against the **originating** period, so a
      pair crossing a period boundary doesn't net to zero in the period
-     where it was posted — it still shows up as its own line in that
+     where it was posted - it still shows up as its own line in that
      period's mismatch table (mission 09's reversal-pairs section).
   7. Sign-off is split, every period: `reports/period_<period>.md`
      accepts the `stg_gl` vs `fact_gl_line` reconciliation but does not
@@ -130,7 +130,7 @@ python3 src/checks.py
 
 ## Non-goals
 
-- Not drawing `docs/architecture.png` — that's issue #1, ordered
+- Not drawing `docs/architecture.png` - that's issue #1, ordered
   independently of this ticket.
 - Not adding a new table, check, or SQL change. Pure documentation.
 - Not changing anything about how a period is signed off; the runbook
@@ -163,7 +163,7 @@ instead of restating what each script's own docstring already says.
 One thing worth a second look surfaced only from stopwatch-running the
 full sequence three times in a row: `SUM(local_amount)` for P03 held at
 `340,498,930.11` across every reload, not `.13` as an earlier mission
-summary had it. Checked it wasn't a new instability — three consecutive
+summary had it. Checked it wasn't a new instability - three consecutive
 `load_fact.py 1000 2024 3` runs in this mission all agreed with each
 other and with the currently committed `reports/period_2024-03.md`, so
 `.13` was a stale figure from an earlier draft, not a live
@@ -172,6 +172,6 @@ document count, same total, every time.
 
 `requirements.txt` ended up with exactly one pinned line
 (`duckdb==1.4.5`) plus two commented-out optional ones. That's correct
-for what this repo actually imports, not under-specified — confirmed by
+for what this repo actually imports, not under-specified - confirmed by
 grepping every `import` in `src/` and `notebooks/*.ipynb` rather than
 assuming from the ecosystem what a "finance pipeline" usually needs.

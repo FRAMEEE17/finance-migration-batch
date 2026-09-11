@@ -26,6 +26,14 @@ def report_path(fiscal_year: int, fiscal_period: int) -> Path:
     return REPO_ROOT / "reports" / f"period_{fiscal_year}-{fiscal_period:02d}.md"
 
 
+def controller_pack_path(fiscal_year: int, fiscal_period: int) -> Path:
+    return REPO_ROOT / "reports" / f"controller_pack_{fiscal_year}-{fiscal_period:02d}.md"
+
+
+def exceptions_path(fiscal_year: int, fiscal_period: int) -> Path:
+    return REPO_ROOT / "reports" / f"exceptions_{fiscal_year}-{fiscal_period:02d}.md"
+
+
 def _no_neg_zero(v):
     """DuckDB's parallel SUM is not associativity-safe: the same query
     can return a tiny negative float (e.g. -2e-7) instead of exactly 0.0
@@ -117,6 +125,14 @@ def _fetch(con, company_code: int, fiscal_year: int, fiscal_period: int) -> dict
         SELECT COUNT(*) FROM dq_violations WHERE {pf} AND check_name = 'unbalanced_document' AND blocking = true
     """).fetchone()[0]
 
+    unbalanced_document_ids = [
+        r[0] for r in con.execute(f"""
+            SELECT DISTINCT document_id FROM dq_violations
+            WHERE {pf} AND check_name = 'unbalanced_document' AND blocking = true
+            ORDER BY 1
+        """).fetchall()
+    ]
+
     return {
         "period_summary": period_summary,
         "exceptions": exceptions,
@@ -128,6 +144,67 @@ def _fetch(con, company_code: int, fiscal_year: int, fiscal_period: int) -> dict
         "reversal": reversal,
         "dq": dq,
         "unbalanced_excluded": unbalanced_excluded,
+        "unbalanced_document_ids": unbalanced_document_ids,
+    }
+
+
+def _fetch_exceptions(con, company_code: int, fiscal_year: int, fiscal_period: int) -> dict:
+    """The 4 material categories for the exception appendix. Each query
+    reuses an already-established predicate from an earlier mission
+    (materiality > 0.01 from mission 06, source='AB' from mission 13,
+    local_amount_expected=false from ADR-0007, NOT is_net_zero from
+    mission 07) rather than inventing a new threshold here."""
+    pf = f"company_code = {company_code} AND fiscal_year = {fiscal_year} AND fiscal_period = {fiscal_period}"
+
+    broadcast_docs = con.execute(f"""
+        WITH doc_totals AS (
+            SELECT document_id, ANY_VALUE(source) AS source, ANY_VALUE(document_type) AS document_type,
+                   COUNT(*) AS n_lines, ROUND(SUM(local_amount), 2) AS net_local_amount
+            FROM stg_gl WHERE {pf}
+            GROUP BY 1
+        ),
+        flagged AS (
+            SELECT DISTINCT document_id FROM dq_violations
+            WHERE check_name = 'local_amount_imbalance' AND {pf}
+        )
+        SELECT d.document_id, d.source, d.document_type, d.n_lines, d.net_local_amount
+        FROM doc_totals d JOIN flagged USING (document_id)
+        WHERE ABS(d.net_local_amount) > 0.01
+        ORDER BY ABS(d.net_local_amount) DESC
+    """).fetchall()
+
+    catch_all = con.execute(f"""
+        SELECT s.gl_account, COUNT(*) AS n_lines, ROUND(SUM(s.local_amount), 2) AS net_local
+        FROM stg_gl s
+        JOIN map_account m ON m.source_account = s.gl_account AND m.status = 'catch_all'
+        WHERE {pf}
+        GROUP BY 1 ORDER BY 1
+    """).fetchall()
+
+    clearing_pairs = con.execute(f"""
+        SELECT s.gl_account, m.pair_id, COUNT(*) AS n_lines,
+               ROUND(SUM(s.debit_amount), 2) AS sum_debit, ROUND(SUM(s.credit_amount), 2) AS sum_credit
+        FROM stg_gl s
+        JOIN map_account m ON m.source_account = s.gl_account AND m.local_amount_expected = false
+        WHERE {pf}
+        GROUP BY 1, 2 ORDER BY 1
+    """).fetchall()
+
+    text_only_reversals = con.execute(f"""
+        SELECT original_document_id, reversal_document_id, any_flagged,
+               original_debit_total, original_credit_total,
+               reversal_debit_total, reversal_credit_total
+        FROM recon_reversal_pairs
+        WHERE NOT is_net_zero
+          AND original_fiscal_year = {fiscal_year} AND original_fiscal_period = {fiscal_period}
+        ORDER BY original_document_id
+    """).fetchall()
+
+    return {
+        "broadcast_docs": broadcast_docs,
+        "catch_all": catch_all,
+        "clearing_pairs": clearing_pairs,
+        "text_only_reversals": text_only_reversals,
     }
 
 
@@ -154,8 +231,10 @@ def build_report_text(data: dict, company_code: int, fiscal_year: int, fiscal_pe
         f"# Period report: {label}",
         "",
         f"Company {company_code}, fiscal year {fiscal_year}, period {fiscal_period:02d}.",
-        "Draft for finance review, see the sign-off section at the end before",
-        "treating any number here as final.",
+        "Working paper (data engineering / internal audit) - not the controller",
+        f"sign-off artifact. See `reports/controller_pack_{fiscal_year}-{fiscal_period:02d}.md`",
+        "for that, and the sign-off section at the end before treating any",
+        "number here as final.",
         "",
         "## Known issue: local_amount is not reliable this period",
         "",
@@ -182,7 +261,18 @@ def build_report_text(data: dict, company_code: int, fiscal_year: int, fiscal_pe
         f"- debit/credit gap, whole scope: **{data['dc_gap']:,.2f}** (the more trustworthy figure;",
         f"  {data['unbalanced_excluded']} document(s) excluded as unbalanced, this is what's left)",
         "",
+        "Source: `recon_period_summary` in `warehouse.duckdb`.",
+        "",
     ]
+
+    if data["unbalanced_document_ids"]:
+        lines += [
+            "Documents excluded as unbalanced (in `stg_gl`, never reach `fact_gl_line`,",
+            "logged in `dq_violations` with `check_name='unbalanced_document'`):",
+            "",
+        ]
+        lines += _markdown_table(["document_id"], [[d] for d in data["unbalanced_document_ids"]])
+        lines.append("")
 
     if data["exceptions"]:
         lines.append("Accounts with a real local_amount gap:")
@@ -197,6 +287,8 @@ def build_report_text(data: dict, company_code: int, fiscal_year: int, fiscal_pe
         "## Mismatches, by bucket and cause",
         "",
         f"Every mismatch this period has a named cause. Unexplained (\"unknown\"): **{data['unknown_pct']}%**.",
+        "",
+        "Source: `recon_mismatch` in `warehouse.duckdb`.",
         "",
     ]
     lines += _markdown_table(
@@ -215,7 +307,11 @@ def build_report_text(data: dict, company_code: int, fiscal_year: int, fiscal_pe
         f"- Economically valid (debit/credit correctly swap): {valid or 0}",
         f"- Flagged as not a real reversal (see issue #7 - mostly planted fraud/anomaly cases): {invalid or 0}",
         "",
+        "Source: `recon_reversal_pairs` in `warehouse.duckdb`.",
+        "",
         "## Data quality, for context (none of this blocks the reconciliation above)",
+        "",
+        "Source: `dq_violations` in `warehouse.duckdb`.",
         "",
     ]
     lines += _markdown_table(
@@ -230,6 +326,11 @@ def build_report_text(data: dict, company_code: int, fiscal_year: int, fiscal_pe
         "This report separates two different things on purpose: whether the",
         "reconciliation process is trustworthy, and whether the reported dollar",
         "total is trustworthy. They are not the same question this period.",
+        "",
+        "Machine-readable state: `period_signoff` in `warehouse.duckdb`, one row",
+        "for this period. Controller-facing pack:",
+        f"`reports/controller_pack_{fiscal_year}-{fiscal_period:02d}.md`.",
+        "Exception detail: `reports/exceptions_{}-{:02d}.md`.".format(fiscal_year, fiscal_period),
         "",
         "**Signed:**",
         "",
@@ -271,6 +372,164 @@ def build_report_text(data: dict, company_code: int, fiscal_year: int, fiscal_pe
     return "\n".join(lines) + "\n"
 
 
+def build_controller_pack_text(data: dict, company_code: int, fiscal_year: int, fiscal_period: int) -> str:
+    """1-2 pages, plain language, risk before totals. A controller signs
+    or withholds from this file alone - technical detail lives in the
+    working paper and exception appendix, referenced by footnote only."""
+    n_accounts, _, _, _, n_exceptions = data["period_summary"]
+    label = f"{fiscal_year}-{fiscal_period:02d}"
+    imbalanced_docs = data["imbalanced_doc_count"]
+    recon_status = "accepted" if data["unknown_pct"] < 20.0 else "rejected"
+
+    lines = [
+        f"# Controller pack: {label}",
+        "",
+        f"Company {company_code}, period {fiscal_period:02d}. For sign-off review.",
+        "",
+        "## Risk this period",
+        "",
+    ]
+    if imbalanced_docs:
+        lines += [
+            f"{imbalanced_docs} documents this period report a currency total that "
+            "cannot be trusted[^1]. The figure normally used to close a period is "
+            "broken for those documents; debit and credit totals are not affected "
+            "and remain reliable. This is a known, tracked issue, not new this "
+            "period.",
+            "",
+        ]
+    else:
+        lines += [
+            "No documents with the known currency-total defect were found this "
+            "period at build time. See the open tracking item below before "
+            "treating that total as verified.",
+            "",
+        ]
+
+    lines += [
+        "## Decision",
+        "",
+        f"- **Reconciliation:** {recon_status}",
+        "- **Reported currency total:** not signed",
+        "",
+        f"- Documents compared[^2]: **{n_accounts}**, matched exactly: **{n_accounts - n_exceptions}**",
+        f"- Debit/credit gap (the figure to use for this period's judgment): "
+        f"**{data['dc_gap']:,.2f}**",
+        "",
+        "The reconciliation decision and the currency-total decision are not the",
+        "same question. A clean reconciliation does not mean the currency total",
+        "is correct - both sides of that comparison inherit the same defect.",
+        "",
+        "## Status at a glance",
+        "",
+    ]
+    lines += _markdown_table(
+        ["recon_status", "local_amount_status", "dc_gap", "defect doc count"],
+        [[recon_status, "not_signed", f"{data['dc_gap']:,.2f}", str(imbalanced_docs)]],
+    )
+    lines += [
+        "",
+        "## Still open",
+        "",
+        "Issue #13 (source-data defect, not this pipeline's territory) has to",
+        "close before the currency total above can be signed. Full detail is in",
+        "the working paper and exception appendix for this period, not repeated",
+        "here.",
+        "",
+        "## Sign-off",
+        "",
+        "Reconciliation reviewed and accepted by:",
+        "",
+        "Signed by: _______________  Date: _______________",
+        "",
+        "Currency total: **not signed this period.**",
+        "",
+        "---",
+        "[^1]: The defect: a document's grand total is repeated on every debit",
+        "line instead of that line's own amount. `local_amount` in the",
+        "warehouse; `stg_gl`/`fact_gl_line` are the raw and modeled tables.",
+        "[^2]: Compared in `recon_period_summary`, one row per account per",
+        "period, in `warehouse.duckdb`.",
+        "",
+    ]
+
+    return "\n".join(lines) + "\n"
+
+
+def build_exceptions_text(data: dict, exc: dict, company_code: int, fiscal_year: int, fiscal_period: int) -> str:
+    """Material items only - the 4 categories issue #15 named. Backs the
+    working paper's summary numbers with document/account-level detail;
+    never lists sub-cent noise."""
+    label = f"{fiscal_year}-{fiscal_period:02d}"
+    non_ab = [d for d in exc["broadcast_docs"] if d[1] != "AB"]
+    root_cause_line = (
+        "Root cause: `source='AB'` (mission 13)."
+        if not non_ab else
+        f"Root cause: `source='AB'` for {len(exc['broadcast_docs']) - len(non_ab)} of these "
+        f"(mission 13); the rest is unrelated sub-cent rounding, kept here only because it "
+        "shares the same materiality-filtered total the working paper quotes."
+    )
+    lines = [
+        f"# Exception appendix: {label}",
+        "",
+        f"Company {company_code}, period {fiscal_period:02d}. Material items only.",
+        "",
+        "## 1. local_amount broadcast documents",
+        "",
+        "Same document set and total as the working paper's Known Issue section",
+        f"(materiality > 0.01): **{data['imbalanced_doc_count']}** documents, "
+        f"**{data['imbalanced_total']:,.1f}**. {root_cause_line}",
+        "",
+    ]
+    lines += _markdown_table(
+        ["document_id", "source", "document_type", "lines", "net local_amount"],
+        [[d, s, dt, str(n), f"{amt:,.2f}"] for d, s, dt, n, amt in exc["broadcast_docs"]],
+    )
+
+    lines += [
+        "",
+        "## 2. catch_all accounts (ADR-0005)",
+        "",
+        "Migration parking codes, not real accounts. Listed for visibility, not",
+        "as a defect - `map_account.csv status='catch_all'`.",
+        "",
+    ]
+    lines += _markdown_table(
+        ["gl_account", "lines this period", "net local_amount"],
+        [[str(a), str(n), f"{amt:,.2f}"] for a, n, amt in exc["catch_all"]],
+    )
+
+    lines += [
+        "",
+        "## 3. Designed zero-local clearing pairs (ADR-0007)",
+        "",
+        "`local_amount` is 0 on every row of these accounts by design, not a",
+        "defect - do not read activity here as a new local_amount problem.",
+        "",
+    ]
+    lines += _markdown_table(
+        ["gl_account", "pair_id", "lines this period", "sum debit", "sum credit"],
+        [[str(a), p, str(n), f"{dr:,.2f}", f"{cr:,.2f}"] for a, p, n, dr, cr in exc["clearing_pairs"]],
+    )
+
+    lines += [
+        "",
+        "## 4. Text-only reversal mismatches (mission 07)",
+        "",
+        "The reversal text convention matched (`REV-...` reference), but the",
+        "amounts don't correspond to the claimed original. Flagged, never",
+        "filtered - most carry an `is_fraud`/`is_anomaly` flag.",
+        "",
+    ]
+    lines += _markdown_table(
+        ["original_document_id", "reversal_document_id", "fraud/anomaly flagged"],
+        [[o, r, "yes" if flagged else "no"] for o, r, flagged, *_ in exc["text_only_reversals"]],
+    )
+    lines.append("")
+
+    return "\n".join(lines) + "\n"
+
+
 def ensure_period_signoff_table(con) -> None:
     con.execute("""
         CREATE TABLE IF NOT EXISTS period_signoff (
@@ -279,12 +538,16 @@ def ensure_period_signoff_table(con) -> None:
             accounts_compared BIGINT, accounts_matched BIGINT,
             dc_gap DOUBLE, unknown_mismatch_pct DOUBLE,
             imbalanced_doc_count BIGINT, imbalanced_total DOUBLE,
-            report_path VARCHAR, generated_at TIMESTAMP
+            report_path VARCHAR, controller_pack_path VARCHAR, exceptions_path VARCHAR,
+            generated_at TIMESTAMP
         )
     """)
 
 
-def write_period_signoff(con, data: dict, company_code: int, fiscal_year: int, fiscal_period: int, path: Path) -> None:
+def write_period_signoff(
+    con, data: dict, company_code: int, fiscal_year: int, fiscal_period: int,
+    report: Path, controller_pack: Path, exceptions: Path,
+) -> None:
     """The machine-readable half of a period's close state (ADR-0008) -
     same data dict the report text comes from, so the two can never
     disagree. recon_status follows the same <20% unknown threshold that
@@ -301,23 +564,47 @@ def write_period_signoff(con, data: dict, company_code: int, fiscal_year: int, f
     con.execute(
         """
         INSERT INTO period_signoff VALUES
-        (?, ?, ?, ?, 'not_signed', ?, ?, ?, ?, ?, ?, ?, now())
+        (?, ?, ?, ?, 'not_signed', ?, ?, ?, ?, ?, ?, ?, ?, ?, now())
         """,
         [
             company_code, fiscal_year, fiscal_period, recon_status,
             n_accounts, n_accounts - n_exceptions, data["dc_gap"], data["unknown_pct"],
-            data["imbalanced_doc_count"], data["imbalanced_total"], str(path),
+            data["imbalanced_doc_count"], data["imbalanced_total"],
+            str(report), str(controller_pack), str(exceptions),
         ],
     )
 
 
 def build_period_report(con, company_code: int, fiscal_year: int, fiscal_period: int) -> Path:
-    """Writes only reports/period_<year>-<period>.md. Read-only-safe - a
-    report rebuild is a pure function of what's already in the
-    warehouse, and checks.py's idempotency check relies on that."""
+    """Writes only reports/period_<year>-<period>.md - the working paper.
+    Read-only-safe - a rebuild is a pure function of what's already in
+    the warehouse, and checks.py's idempotency check relies on that."""
     data = _fetch(con, company_code, fiscal_year, fiscal_period)
     text = build_report_text(data, company_code, fiscal_year, fiscal_period)
     path = report_path(fiscal_year, fiscal_period)
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(text)
+    return path
+
+
+def build_controller_pack(con, company_code: int, fiscal_year: int, fiscal_period: int) -> Path:
+    """Writes reports/controller_pack_<year>-<period>.md. Read-only-safe,
+    same reason as build_period_report()."""
+    data = _fetch(con, company_code, fiscal_year, fiscal_period)
+    text = build_controller_pack_text(data, company_code, fiscal_year, fiscal_period)
+    path = controller_pack_path(fiscal_year, fiscal_period)
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(text)
+    return path
+
+
+def build_exceptions_appendix(con, company_code: int, fiscal_year: int, fiscal_period: int) -> Path:
+    """Writes reports/exceptions_<year>-<period>.md. Read-only-safe, same
+    reason as build_period_report()."""
+    data = _fetch(con, company_code, fiscal_year, fiscal_period)
+    exc = _fetch_exceptions(con, company_code, fiscal_year, fiscal_period)
+    text = build_exceptions_text(data, exc, company_code, fiscal_year, fiscal_period)
+    path = exceptions_path(fiscal_year, fiscal_period)
     path.parent.mkdir(exist_ok=True)
     path.write_text(text)
     return path
@@ -330,11 +617,13 @@ def main() -> int:
     company_code, fiscal_year, fiscal_period = (int(v) for v in sys.argv[1:4])
 
     con = duckdb.connect(str(WAREHOUSE_DB))
-    path = build_period_report(con, company_code, fiscal_year, fiscal_period)
+    report = build_period_report(con, company_code, fiscal_year, fiscal_period)
+    controller_pack = build_controller_pack(con, company_code, fiscal_year, fiscal_period)
+    exceptions = build_exceptions_appendix(con, company_code, fiscal_year, fiscal_period)
     data = _fetch(con, company_code, fiscal_year, fiscal_period)
-    write_period_signoff(con, data, company_code, fiscal_year, fiscal_period, path)
+    write_period_signoff(con, data, company_code, fiscal_year, fiscal_period, report, controller_pack, exceptions)
     con.close()
-    print(f"wrote {path}")
+    print(f"wrote {report}\nwrote {controller_pack}\nwrote {exceptions}")
     return 0
 
 

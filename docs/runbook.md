@@ -10,7 +10,7 @@ seen this repo.
 pip install -r requirements.txt
 ```
 
-`warehouse.duckdb` is gitignored. It doesn't need to exist first — the
+`warehouse.duckdb` is gitignored. It doesn't need to exist first - the
 first script below creates it.
 
 ## Run one period end to end
@@ -44,7 +44,7 @@ issue #12 is for reading this file and understanding what you're
 looking at, not for the commands to finish.
 
 `src/checks.py` should end with `N/N passed`, all green. If it doesn't, read the
-failing check's own name and detail line before touching any SQL — each
+failing check's own name and detail line before touching any SQL - each
 one states what it measured, not just pass/fail.
 
 ## Where it breaks
@@ -60,13 +60,13 @@ the command line, not something the script guesses for you.
 transaction, deletes the period's rows, deliberately queries a table
 that doesn't exist, and confirms the rollback put the row count back to
 what it was. If that check itself fails, the script exits before
-touching real data — something is wrong with the database file or the
+touching real data - something is wrong with the database file or the
 DuckDB install, not with the source data.
 
 **A blocking `dq_violations` row.** `run_gate()` in `quality_gate.py`
 runs five checks: `unbalanced_document`, `duplicate_source`,
 `map_fanout`, `null_key_column`, `unmapped_doc_type`. Any row that
-trips one of these never reaches `fact_gl_line` — it's logged in
+trips one of these never reaches `fact_gl_line` - it's logged in
 `dq_violations` with `blocking = true` instead. Three more checks
 (`local_amount_imbalance`, `unmapped_account`, `catch_all_account`) are
 non-blocking: they get logged too, but the row still loads normally.
@@ -78,20 +78,20 @@ looks smaller than `stg_gl`'s for the same scope.
 `load_fact.py` deletes and re-inserts only the periods you pass on the
 command line, in one transaction, every run. Calling it again with the
 same arguments gives the same row count, document count, and
-`SUM(local_amount)` — it never appends. `reconcile_account.py` and
+`SUM(local_amount)` - it never appends. `reconcile_account.py` and
 `reconcile_mismatch.py` follow the same rule at the summary-table level:
 call them with no arguments and they rebuild every period currently in
 `fact_gl_line`; call them with a list of `(company, year, period)`
 triples and they delete and rewrite only those periods, leaving every
 other period's already-built rows untouched. Neither script issues a
-bare `DELETE`/`CREATE OR REPLACE TABLE` against the whole table — an
+bare `DELETE`/`CREATE OR REPLACE TABLE` against the whole table - an
 earlier draft of both did, and it would have silently wiped every
 period except the one being reloaded (see `docs/missions/10-backfill-2024-02-03.md`).
 
 ## Where mismatches land
 
 `recon_mismatch` compares `stg_gl` against the **close-eligible** subset
-of `fact_gl_line` — the rows that are not flagged
+of `fact_gl_line` - the rows that are not flagged
 `is_opening_balance`, `is_closing_entry`, or `is_post_close`. Comparing
 against the full `fact_gl_line` table instead only ever produces the
 `missing_in_fact` bucket, because those three flags load a row and flag
@@ -105,7 +105,7 @@ Reversal pairs (`reference` starting `REV-...`, linked to the original
 by document ID) are reported against the period the **original**
 document posted in, not the reversal's period. A pair that crosses a
 period boundary doesn't net to zero and disappear in the original
-period — it still shows up there as its own line, because the
+period - it still shows up there as its own line, because the
 reversal itself hasn't happened yet as far as that period is concerned.
 
 ## Sign-off is split, and the report isn't the artifact
@@ -113,9 +113,9 @@ reversal itself hasn't happened yet as far as that period is concerned.
 Every `reports/period_<year>-<period>.md` separates two different
 claims:
 
-- the `stg_gl` vs `fact_gl_line` reconciliation — accepted, once the
+- the `stg_gl` vs `fact_gl_line` reconciliation - accepted, once the
   gap is 0.00 and every account matches
-- the reported `local_amount` total — **not signed**, because a set of
+- the reported `local_amount` total - **not signed**, because a set of
   documents has `local_amount` broadcasting a document's grand total
   across every debit line instead of a real per-line amount (issue
   #13). Both sides of the reconciliation inherit the same broken
@@ -137,10 +137,26 @@ would read. Building either of those is out of scope for now; don't
 wire a BI dashboard straight to `local_amount` before `period_signoff`
 exists to sit in front of it.
 
+`build_period_report.py` writes 3 files per period, one call, split by
+audience (mission 15):
+
+- `reports/period_<year>-<period>.md` - the working paper above, data
+  engineering / internal audit, every number traceable to a warehouse
+  query
+- `reports/controller_pack_<year>-<period>.md` - 1-2 pages, plain
+  language, risk before totals, the file a controller actually reads
+  to sign or withhold
+- `reports/exceptions_<year>-<period>.md` - material items only
+  (local_amount broadcast documents, catch_all accounts, designed
+  zero-local clearing pairs, text-only reversal mismatches), backing
+  the other two with document-level detail
+
+`period_signoff` carries all 3 paths, not just the working paper's.
+
 ## One Python-version trap
 
 This repo runs on Python 3.9. `X | None` type-hint syntax (PEP 604)
-fails at import time here — use `typing.Optional[X]` instead. Bare
+fails at import time here - use `typing.Optional[X]` instead. Bare
 generic hints like `list[int]` or `dict[str, int]` (PEP 585, no union)
 work fine on 3.9; only the `|` union operator needs `typing`. This bit
 `src/reconcile_account.py` and `src/reconcile_mismatch.py` during
@@ -148,7 +164,7 @@ mission 10 before it was caught.
 
 ## Notebooks
 
-`notebooks/*.ipynb` hold the Exploration behind each mission — real,
+`notebooks/*.ipynb` hold the Exploration behind each mission - real,
 executed queries, not narrated ones. They're not part of running a
 period; open them directly to read the output already in them. To
 re-execute one:

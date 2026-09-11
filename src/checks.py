@@ -783,6 +783,113 @@ def period_signoff_matches_report(con):
     return not bad, "period_signoff agrees with all 3 reports" if not bad else f"disagreements: {bad}"
 
 
+# Ticket 15: controller pack / exception appendix (issue #15)
+
+def close_pack_files_exist(con):
+    """All 3 artifacts (working paper, controller pack, exception
+    appendix) exist for all 3 periods - 9 files, not just the 3 the
+    project already had before mission 15."""
+    missing = []
+    for _, y, p in BACKFILL_PERIODS:
+        for path_fn in (
+            build_period_report.report_path,
+            build_period_report.controller_pack_path,
+            build_period_report.exceptions_path,
+        ):
+            if not path_fn(y, p).exists():
+                missing.append(str(path_fn(y, p)))
+    return not missing, "all 9 files exist" if not missing else f"missing: {missing}"
+
+
+def controller_pack_never_claims_verified_or_final(con):
+    """Same rule as the working paper (mission 09), now checked on the
+    file finance actually reads."""
+    bad = []
+    for _, y, p in BACKFILL_PERIODS:
+        text = build_period_report.controller_pack_path(y, p).read_text()
+        if "verified" in text.lower() or ('"final"' in text or "**final**" in text.lower()):
+            bad.append(f"{y}-{p:02d}")
+    return not bad, "no verified/final claims in any controller pack" if not bad else f"found in: {bad}"
+
+
+def controller_pack_risk_before_decision(con):
+    """The risk/known-issue section appears before the Decision section -
+    same byte-offset discipline as the working paper's own check, applied
+    to the file a controller actually reads first."""
+    bad = []
+    for _, y, p in BACKFILL_PERIODS:
+        text = build_period_report.controller_pack_path(y, p).read_text()
+        risk_pos = text.find("## Risk this period")
+        decision_pos = text.find("## Decision")
+        if risk_pos == -1 or decision_pos == -1 or risk_pos >= decision_pos:
+            bad.append(f"{y}-{p:02d}")
+    return not bad, "risk before decision in all 3 controller packs" if not bad else f"wrong order in: {bad}"
+
+
+def controller_pack_shows_split_decision(con):
+    """The two decisions (reconciliation, local_amount) are both present
+    and never collapsed into one status - the one rule this whole mission
+    exists to enforce, checked on the actual controller-facing file."""
+    bad = []
+    for _, y, p in BACKFILL_PERIODS:
+        text = build_period_report.controller_pack_path(y, p).read_text()
+        if "**Reconciliation:**" not in text or "**Reported currency total:**" not in text:
+            bad.append(f"{y}-{p:02d}")
+    return not bad, "both decisions shown separately in all 3 controller packs" if not bad else f"missing in: {bad}"
+
+
+def exceptions_broadcast_total_matches_working_paper(con):
+    """The exception appendix's local_amount broadcast section is the
+    same document count and total the working paper's Known Issue
+    section already quotes - two files, one number, never allowed to
+    drift."""
+    bad = []
+    for c, y, p in BACKFILL_PERIODS:
+        data = build_period_report._fetch(con, c, y, p)
+        exc = build_period_report._fetch_exceptions(con, c, y, p)
+        got_count = len(exc["broadcast_docs"])
+        got_total = round(sum(row[4] for row in exc["broadcast_docs"]), 1)
+        want_count = data["imbalanced_doc_count"]
+        want_total = round(data["imbalanced_total"], 1)
+        if got_count != want_count or abs(got_total - want_total) > 0.1:
+            bad.append(f"{y}-{p:02d}: appendix={got_count}/{got_total}  report={want_count}/{want_total}")
+    return not bad, "appendix agrees with working paper in all 3 periods" if not bad else f"disagreements: {bad}"
+
+
+def period_signoff_carries_all_three_paths(con):
+    """period_signoff points at all 3 artifacts, not just the working
+    paper - a BI tool reading this table needs to find the controller
+    pack and exception appendix too."""
+    bad = []
+    for c, y, p in BACKFILL_PERIODS:
+        row = con.execute(f"""
+            SELECT report_path, controller_pack_path, exceptions_path
+            FROM period_signoff WHERE company_code = {c} AND fiscal_year = {y} AND fiscal_period = {p}
+        """).fetchone()
+        if row is None or any(v is None or v == "" for v in row):
+            bad.append(f"{y}-{p:02d}: {row}")
+    return not bad, "all 3 paths present for all 3 periods" if not bad else f"missing paths: {bad}"
+
+
+def close_pack_idempotent_rebuild(con):
+    """Rebuilding the controller pack and exception appendix from the
+    same warehouse state reproduces identical files - same proof as the
+    working paper's own idempotency check, extended to the 2 new files."""
+    changed = []
+    for c, y, p in BACKFILL_PERIODS:
+        for path_fn, build_fn in (
+            (build_period_report.controller_pack_path, build_period_report.build_controller_pack),
+            (build_period_report.exceptions_path, build_period_report.build_exceptions_appendix),
+        ):
+            path = path_fn(y, p)
+            before = path.read_bytes()
+            build_fn(con, c, y, p)
+            after = path.read_bytes()
+            if before != after:
+                changed.append(f"{y}-{p:02d}:{path.name}")
+    return not changed, "all 6 files identical after rebuild" if not changed else f"rebuild changed: {changed}"
+
+
 # Ticket 10: backfill 2024-02 and 2024-03
 
 def p01_unchanged_after_backfill(con):
@@ -878,6 +985,13 @@ CHECKS = [
     ("period report sign-off lines present", period_report_signoff_lines_present),
     ("period report idempotent rebuild", period_report_idempotent_rebuild),
     ("period_signoff matches report", period_signoff_matches_report),
+    ("close pack files exist (9 files)", close_pack_files_exist),
+    ("controller pack never claims verified/final", controller_pack_never_claims_verified_or_final),
+    ("controller pack risk before decision", controller_pack_risk_before_decision),
+    ("controller pack shows split decision", controller_pack_shows_split_decision),
+    ("exceptions broadcast total matches working paper", exceptions_broadcast_total_matches_working_paper),
+    ("period_signoff carries all 3 paths", period_signoff_carries_all_three_paths),
+    ("close pack idempotent rebuild", close_pack_idempotent_rebuild),
     ("P01 unchanged after backfill", p01_unchanged_after_backfill),
     ("dq_violations present every period", dq_violations_present_every_period),
     ("recon tables hold all 3 periods", recon_tables_hold_all_three_periods),
