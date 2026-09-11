@@ -190,10 +190,9 @@ flagged before trusting it.
 One loose end surfaced but not chased down: while verifying the
 acceptance criteria for a future regenerated file, checked for a
 `local_amount = 0` despite nonzero debit/credit pattern. It's real (931
-rows dataset-wide, 58 documents in this pipeline's own P01-P03 scope)
-but correlates with `source IN ('automated', 'adjustment')`, not `AB`,
-and touches zero reversal documents - a different defect shape than
-this mission's broadcast pattern. Recorded as an open question in ADR
-0006 rather than folded into this mission's findings; whether it's
-issue #13's territory or its own ticket is for you to decide, not
-something this mission should assume either way.
+rows dataset-wide) but a first pass at `source IN ('automated',
+'adjustment')` as the predictor didn't hold up under the same
+precision/recall test that found `source = 'AB'` for this mission -
+only 11% precision. Filed as its own ticket, issue #14, rather than
+folded into this mission's findings or closed on that loose
+correlation.

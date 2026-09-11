@@ -65,15 +65,15 @@ Before treating a new source drop as fixing this defect:
 - Checked across all 4 companies and both fiscal years, not just the
   company 1000 / FY2024 P01-P03 scope this pipeline currently loads.
 
-## Open question, not settled by this ADR
+## Related but separate: local_amount = 0
 
-A related but distinct pattern exists: rows where `local_amount = 0`
-despite a nonzero `debit_amount` or `credit_amount`. Dataset-wide this
-is 931 rows (580 of them company 1000 / FY2024), 58 documents inside
-this pipeline's P01-P03 scope. It correlates with `source IN
-('automated', 'adjustment')`, not `source = 'AB'`, and has zero overlap
-with reversal documents (`reference LIKE 'REV-%'`). This is a different
-defect shape from the broadcast pattern this ADR covers - conflating
-the two would misattribute both. Whether it belongs inside issue #13's
-scope or as its own ticket is not decided here; see mission 13's Retro
-for the open question recorded back to the issue.
+A different pattern exists: rows where `local_amount = 0` despite a
+nonzero `debit_amount` or `credit_amount` (931 rows dataset-wide).
+Tracked as its own ticket, issue #14 - not this ADR's territory. A
+6-account clearing-pair sub-case (`115020`/`205020` and siblings)
+is already closed with 100% precision via `map_account.csv`'s own
+`dq_flag`; the other 773 rows have no confirmed predictor yet. Zero
+overlap with reversal documents or with `source = 'AB'`. Conflating it
+with this ADR's broadcast pattern would misattribute both and tangle
+the acceptance criteria for whatever regenerated file eventually closes
+each one.
