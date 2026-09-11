@@ -6,7 +6,7 @@ seen this repo.
 
 ## Setup
 
-```
+```bash
 pip install -r requirements.txt
 ```
 
@@ -15,7 +15,7 @@ first script below creates it.
 
 ## Run one period end to end
 
-```
+```bash
 python3 src/load_stg.py
 python3 src/load_fact.py <company_code> <fiscal_year> <fiscal_period> [<fiscal_period> ...]
 python3 src/reconcile_account.py
@@ -27,7 +27,7 @@ python3 src/checks.py
 For this repo's current scope (company `1000`, fiscal year `2024`,
 periods `01`-`03`):
 
-```
+```bash
 python3 src/load_stg.py
 python3 src/load_fact.py 1000 2024 1 2 3
 python3 src/reconcile_account.py
@@ -169,7 +169,7 @@ executed queries, not narrated ones. They're not part of running a
 period; open them directly to read the output already in them. To
 re-execute one:
 
-```
+```bash
 pip install nbconvert ipykernel
 jupyter nbconvert --to notebook --execute --inplace notebooks/<name>.ipynb --ExecutePreprocessor.kernel_name=python3
 ```
