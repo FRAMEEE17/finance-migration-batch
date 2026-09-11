@@ -20,3 +20,16 @@ Two hypotheses, both tested with queries before any transform (see `notebooks/06
 ## What this note is not
 
 Not a fix. `stg_gl` is raw and immutable; a "corrected" `local_amount` in `fact_gl_line` would be editing a target amount, which `docs/business-rules.md` rules out without a separate, explicit decision. Root-cause investigation into how the source dataset generates `local_amount` for high-line-count documents is tracked separately (see the source-data ticket this note references once filed), not attempted here.
+
+## Update: root cause found, and it isn't line count
+
+`docs/missions/13-local-amount-source-investigation.md` (issue #13)
+found the actual cause: `source = 'AB'`, not high line count. Every
+`source = 'AB'` document in the whole 648,801-row file is affected;
+plenty of high-line-count documents from other sources aren't. Line
+count only looked like the cause because `AB` documents happen to
+always be high-line-count ones. The defect is dataset-wide too - all 4
+companies, both fiscal years, 1,132 documents, `$9,522,749,609.33` net
+`local_amount` - not a P01 or company-1000 finding. This note's own
+20-document, 97,144,587.1 figure stays accurate for P01 specifically;
+mission 13 is the place to read for the full picture.
