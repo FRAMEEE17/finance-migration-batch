@@ -928,6 +928,63 @@ def recon_tables_hold_all_three_periods(con):
     return ok, f"recon_period_summary periods={sorted(summary_periods)}  recon_mismatch periods={sorted(mismatch_periods)}  want={sorted(want)}"
 
 
+# Ticket 16: safe read path for daily data consumers (fact_gl_line_ready)
+
+HOW_TO_QUERY_MD = REPO_ROOT / "docs" / "how-to-query-fact_gl_line.md"
+
+
+def fact_gl_line_ready_is_a_view(con):
+    kind = con.execute("""
+        SELECT table_type FROM information_schema.tables WHERE table_name = 'fact_gl_line_ready'
+    """).fetchone()
+    return kind == ("VIEW",), f"table_type={kind}  want=('VIEW',) - always current, never a stale copy"
+
+
+def fact_gl_line_ready_only_accepted_periods(con):
+    bad = con.execute("""
+        SELECT COUNT(*) FROM fact_gl_line_ready WHERE recon_status != 'accepted'
+    """).fetchone()[0]
+    return bad == 0, f"{bad} rows with recon_status != 'accepted' (want 0 - a blocked period must never appear)"
+
+
+def fact_gl_line_ready_movement_flag_correct(con):
+    bad = con.execute("""
+        SELECT COUNT(*) FROM fact_gl_line_ready
+        WHERE is_period_movement != (NOT is_opening_balance AND NOT is_closing_entry AND NOT is_post_close)
+    """).fetchone()[0]
+    return bad == 0, f"{bad} rows where is_period_movement disagrees with a fresh computation"
+
+
+def fact_gl_line_ready_row_count_matches_fact(con):
+    """Every period currently in fact_gl_line is recon_status='accepted',
+    so the view should drop nothing today - if this ever diverges, a
+    period fell out of the view silently, not visibly."""
+    view_n = con.execute("SELECT COUNT(*) FROM fact_gl_line_ready").fetchone()[0]
+    fact_n = con.execute("SELECT COUNT(*) FROM fact_gl_line").fetchone()[0]
+    return view_n == fact_n, f"fact_gl_line_ready={view_n:,}  fact_gl_line={fact_n:,}"
+
+
+def how_to_query_doc_has_real_trap_example(con):
+    """The wrong-example number in the doc is re-derived here, not
+    trusted from when the doc was written - if the warehouse ever
+    changes, a stale number in a "don't do this" doc is worse than no
+    example at all."""
+    if not HOW_TO_QUERY_MD.exists():
+        return False, f"{HOW_TO_QUERY_MD} does not exist"
+    text = HOW_TO_QUERY_MD.read_text()
+    if "SUM(local_amount)" not in text:
+        return False, "no SUM(local_amount) example found"
+    doc_id = "0a121d1e-7334-81f7-2608-9bb9a6e55fab"
+    if doc_id not in text:
+        return False, f"trap example document {doc_id} not referenced in doc"
+    got = con.execute(f"""
+        SELECT ROUND(SUM(local_amount), 2) FROM fact_gl_line_ready WHERE document_id = '{doc_id}'
+    """).fetchone()[0]
+    if f"{got:,.2f}" not in text:
+        return False, f"doc's stated wrong-example number is stale - fresh query gives {got:,.2f}"
+    return True, f"trap example present and matches a fresh query: {got:,.2f}"
+
+
 
 CHECKS = [
     ("stg_gl exists", stg_gl_exists),
@@ -995,6 +1052,11 @@ CHECKS = [
     ("P01 unchanged after backfill", p01_unchanged_after_backfill),
     ("dq_violations present every period", dq_violations_present_every_period),
     ("recon tables hold all 3 periods", recon_tables_hold_all_three_periods),
+    ("fact_gl_line_ready is a view", fact_gl_line_ready_is_a_view),
+    ("fact_gl_line_ready only accepted periods", fact_gl_line_ready_only_accepted_periods),
+    ("fact_gl_line_ready movement flag correct", fact_gl_line_ready_movement_flag_correct),
+    ("fact_gl_line_ready row count matches fact", fact_gl_line_ready_row_count_matches_fact),
+    ("how-to-query doc has real trap example", how_to_query_doc_has_real_trap_example),
 ]
 
 

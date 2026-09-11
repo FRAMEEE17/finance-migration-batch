@@ -21,6 +21,7 @@ python3 src/load_fact.py <company_code> <fiscal_year> <fiscal_period> [<fiscal_p
 python3 src/reconcile_account.py
 python3 src/reconcile_mismatch.py
 python3 src/build_period_report.py <company_code> <fiscal_year> <fiscal_period>
+python3 src/build_analyst_view.py
 python3 src/checks.py
 ```
 
@@ -35,6 +36,7 @@ python3 src/reconcile_mismatch.py
 python3 src/build_period_report.py 1000 2024 1
 python3 src/build_period_report.py 1000 2024 2
 python3 src/build_period_report.py 1000 2024 3
+python3 src/build_analyst_view.py
 python3 src/checks.py
 ```
 
@@ -152,6 +154,17 @@ audience (mission 15):
   the other two with document-level detail
 
 `period_signoff` carries all 3 paths, not just the working paper's.
+
+## Querying the data, not the reports
+
+Finance and audit read the 3 files above. A daily consumer (analyst,
+BI, a notebook) shouldn't - they query `fact_gl_line_ready` (mission
+16, `src/build_analyst_view.py`), a view that only includes periods
+`period_signoff` marks `recon_status='accepted'` and flags whether
+`local_amount` is safe to sum per row. Full grain, column, and
+right/wrong-query detail: `docs/how-to-query-fact_gl_line.md`. Not a
+dashboard, not a second sign-off artifact - the gate a dashboard would
+read later, if one gets built.
 
 ## One Python-version trap
 
