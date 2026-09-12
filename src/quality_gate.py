@@ -143,16 +143,27 @@ def run_gate(con, scope_filter: str) -> dict:
     """).fetchall()
     counts["local_amount_imbalance"] = _log(con, "local_amount_imbalance", False, imbalanced)
 
-    # non-blocking: unmapped_account (line grain)
-    unmapped_accounts = con.execute("""
-        SELECT source_account FROM map_account
-        WHERE status = 'unmapped' OR (status = 'deprecated' AND (target_account IS NULL OR target_account = ''))
-    """).fetchall()
-    unmapped_list = ",".join(str(a[0]) for a in unmapped_accounts) if unmapped_accounts else "NULL"
+    # non-blocking: unmapped_account (line grain). Two ways a gl_account
+    # counts (docs/definitions.md): absent from map_account.csv entirely
+    # (m.source_account IS NULL after the join - issue #17, the real
+    # dataset has never had one, build_mapping.py guarantees every
+    # in-scope account gets a row), or present but status='unmapped' /
+    # 'deprecated' with no target. One LEFT JOIN catches both instead of
+    # an IN-list that only ever saw accounts already inside the file.
     unmapped_rows = con.execute(f"""
-        SELECT company_code, document_id, line_number, fiscal_year, fiscal_period,
-               'gl_account ' || gl_account || ' is unmapped'
-        FROM stg_gl WHERE {scope_filter} AND gl_account IN ({unmapped_list})
+        SELECT s.company_code, s.document_id, s.line_number, s.fiscal_year, s.fiscal_period,
+               CASE WHEN m.source_account IS NULL
+                    THEN 'gl_account ' || s.gl_account || ' has no row in map_account.csv'
+                    ELSE 'gl_account ' || s.gl_account || ' is unmapped'
+               END
+        FROM stg_gl s
+        LEFT JOIN map_account m ON m.source_account = s.gl_account
+        WHERE {scope_filter}
+          AND (
+              m.source_account IS NULL
+              OR m.status = 'unmapped'
+              OR (m.status = 'deprecated' AND (m.target_account IS NULL OR m.target_account = ''))
+          )
     """).fetchall()
     counts["unmapped_account"] = _log(con, "unmapped_account", False, unmapped_rows)
 

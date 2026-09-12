@@ -143,30 +143,24 @@ def duplicate_grain_excluded(con):
     return ok, f"duplicated line_number=1 in fact_gl_line={dup_line} (want 0), line_number=2 in fact_gl_line={other_line} (want 0, excluded document-grain), duplicate_source logged blocking={blocking} (want >0)"
 
 
-def unmapped_account_loads_without_flag_known_gap(con):
-    """docs/definitions.md:200 documents unmapped_account as including a
-    gl_account "not present in map_account.csv" - but
-    quality_gate.py's actual query only checks rows *inside*
-    map_account.csv tagged status='unmapped'/'deprecated'; an account
-    with zero rows in the file at all is never queried for, so it loads
-    silently with no finding. Real gap, found by this fixture precisely
-    because build_mapping.py guarantees the real dataset can never
-    produce this case (every account that appears in scope gets a row,
-    by construction) - 16 tickets of real data never exercised this
-    path. Filed as issue #17, out of scope for ticket 18 (fixing it
-    changes quality_gate.py's real P01-P03 dq_violations counts, a
-    bigger blast radius than CI). This check pins today's actual
-    behavior so a real fix is a deliberate, visible change to this
-    file, not a silent one."""
+def unmapped_account_logged_not_excluded(con):
+    """Fixed by mission 17: quality_gate.py's unmapped_account query now
+    LEFT JOINs map_account instead of matching an IN-list built only
+    from rows already inside the file, so a gl_account with zero rows
+    in map_account.csv (this fixture's 999888) gets caught too - not
+    just accounts present but tagged status='unmapped'. Was a known,
+    pinned gap (issue #17) until this fix; this check now asserts the
+    real, current, fixed behavior, not the old gap."""
     fact_rows = con.execute(f"""
         SELECT COUNT(*) FROM fact_gl_line WHERE {PF} AND document_id = 'CI-DOC-UNMAPPED-001'
     """).fetchone()[0]
     logged = con.execute(f"""
         SELECT COUNT(*) FROM dq_violations
-        WHERE {PF} AND document_id = 'CI-DOC-UNMAPPED-001' AND check_name = 'unmapped_account'
+        WHERE {PF} AND document_id = 'CI-DOC-UNMAPPED-001'
+          AND check_name = 'unmapped_account' AND blocking = false
     """).fetchone()[0]
-    ok = fact_rows == 2 and logged == 0
-    return ok, f"in fact_gl_line={fact_rows} (want 2), unmapped_account logged={logged} (want 0 - known gap, issue #17, not '>0' as docs/definitions.md would imply)"
+    ok = fact_rows == 2 and logged > 0
+    return ok, f"in fact_gl_line={fact_rows} (want 2, non-blocking), unmapped_account logged={logged} (want >0)"
 
 
 def idempotent_reload(before: tuple) -> tuple:
@@ -194,7 +188,7 @@ CHECKS = [
     ("AB broadcast detected", ab_broadcast_detected),
     ("opening balance flagged, not excluded", opening_balance_flagged_not_excluded),
     ("duplicate grain excluded", duplicate_grain_excluded),
-    ("unmapped account loads without flag (known gap, #17)", unmapped_account_loads_without_flag_known_gap),
+    ("unmapped account logged, not excluded", unmapped_account_logged_not_excluded),
 ]
 
 
