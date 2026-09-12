@@ -1,0 +1,28 @@
+name: checks
+
+# Runs the gate mechanism against tests/fixtures/journal_entries_ci.parquet
+# on every push and PR - never the real dataset, which stays out of git
+# on purpose (see tests/fixtures/build_ci_fixture.py). No step here
+# reaches outside the repo beyond pip installing a pinned dependency;
+# nothing here writes back to reports/ for the real project scope.
+
+"on":
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - run: python3 tests/ci_checks.py

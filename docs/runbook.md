@@ -19,11 +19,23 @@ first script below creates it.
 python3 src/load_stg.py
 python3 src/load_fact.py <company_code> <fiscal_year> <fiscal_period> [<fiscal_period> ...]
 python3 src/reconcile_account.py
+python3 src/reconcile_reversals.py
 python3 src/reconcile_mismatch.py
 python3 src/build_period_report.py <company_code> <fiscal_year> <fiscal_period>
 python3 src/build_analyst_view.py
 python3 src/checks.py
 ```
+
+`reconcile_reversals.py` only needs to run once, not once per period - it
+isn't period-scoped (mission 07). But it has to run **before**
+`reconcile_mismatch.py` at least once on any warehouse, fresh or not:
+`reconcile_mismatch.py` enriches every row with reversal-pair info by
+joining `recon_reversal_pairs`, and that table doesn't exist until
+`reconcile_reversals.py` creates it. Skip this step on a genuinely fresh
+warehouse and `reconcile_mismatch.py` crashes with a DuckDB
+`CatalogException`, not a helpful message - caught by ticket 18's CI
+fixture pipeline, which runs on a fresh warehouse every time by
+construction.
 
 For this repo's current scope (company `1000`, fiscal year `2024`,
 periods `01`-`03`):
@@ -32,6 +44,7 @@ periods `01`-`03`):
 python3 src/load_stg.py
 python3 src/load_fact.py 1000 2024 1 2 3
 python3 src/reconcile_account.py
+python3 src/reconcile_reversals.py
 python3 src/reconcile_mismatch.py
 python3 src/build_period_report.py 1000 2024 1
 python3 src/build_period_report.py 1000 2024 2
