@@ -74,7 +74,10 @@ as-is; this mission turns it from a documented gap into a real pass.
       logged non-blocking (1 row), not silently absent.
 - [x] `tests/ci_checks.py` passes end to end, 8/8, with the renamed
       `unmapped_account_logged_not_excluded` asserting the fixed
-      behavior instead of pinning the old gap.
+      behavior instead of pinning the old gap. Confirmed on real
+      GitHub Actions infrastructure, not just locally: run
+      [34719092505](https://github.com/FRAMEEE17/finance-migration-batch/actions/runs/34719092505),
+      `unmapped_account logged=1 (want >0)`, `8/8 passed`.
 - [x] `build_dim_account`'s majority-vote query and the 115/205
       clearing-pair handling are byte-identical - `git diff --stat`
       shows only `src/quality_gate.py` touched, `src/build_mapping.py`
