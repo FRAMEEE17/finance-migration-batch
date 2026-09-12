@@ -92,6 +92,15 @@ def load_period(con, company_code: int, fiscal_year: int, fiscal_period: int) ->
                    s.document_type = '{CLOSING_ENTRY_TYPE}' AS is_closing_entry,
                    now() AS loaded_at
             FROM stg_gl s
+            -- looks exposed to the same map_account fan-out as
+            -- quality_gate.py's unmapped_account query (#19), but isn't:
+            -- run_gate() above already ran map_fanout (blocking) before
+            -- this INSERT, and the NOT EXISTS filter below excludes a
+            -- line entirely once it's flagged blocking, so both fan-out
+            -- copies get excluded together instead of one landing here
+            -- duplicated. Verified with a synthetic 2-row map_account
+            -- duplicate: fact_gl_line ends up with 0 rows for that line,
+            -- not 2.
             LEFT JOIN map_account m ON m.source_account = s.gl_account
             WHERE {pf}
               -- only blocking dq_violations exclude a row; non-blocking
