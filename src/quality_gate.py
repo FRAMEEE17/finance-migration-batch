@@ -98,12 +98,12 @@ def run_gate(con, scope_filter: str) -> dict:
     fanout_accounts = con.execute("""
         SELECT source_account, COUNT(*) n FROM map_account GROUP BY 1 HAVING n > 1
     """).fetchall()
+    fanout_account_list = ",".join(str(a[0]) for a in fanout_accounts)
     if fanout_accounts:
-        acct_list = ",".join(str(a[0]) for a in fanout_accounts)
         fanout_rows = con.execute(f"""
             SELECT company_code, document_id, line_number, fiscal_year, fiscal_period,
                    'source_account ' || gl_account || ' appears >1x in map_account.csv'
-            FROM stg_gl WHERE {scope_filter} AND gl_account IN ({acct_list})
+            FROM stg_gl WHERE {scope_filter} AND gl_account IN ({fanout_account_list})
         """).fetchall()
     else:
         fanout_rows = []
@@ -150,6 +150,15 @@ def run_gate(con, scope_filter: str) -> dict:
     # in-scope account gets a row), or present but status='unmapped' /
     # 'deprecated' with no target. One LEFT JOIN catches both instead of
     # an IN-list that only ever saw accounts already inside the file.
+    #
+    # Excludes accounts map_fanout already caught (mission 19): a
+    # fanned-out source_account joins to more than one map_account row,
+    # which would log this gl_account here once per duplicate instead of
+    # once. map_fanout is the right place for that finding - it's a
+    # mapping-file problem, not an unmapped-account one - so those
+    # accounts are left out of this query entirely rather than deduped
+    # after the fact.
+    fanout_exclusion = f"AND s.gl_account NOT IN ({fanout_account_list})" if fanout_accounts else ""
     unmapped_rows = con.execute(f"""
         SELECT s.company_code, s.document_id, s.line_number, s.fiscal_year, s.fiscal_period,
                CASE WHEN m.source_account IS NULL
@@ -159,6 +168,7 @@ def run_gate(con, scope_filter: str) -> dict:
         FROM stg_gl s
         LEFT JOIN map_account m ON m.source_account = s.gl_account
         WHERE {scope_filter}
+          {fanout_exclusion}
           AND (
               m.source_account IS NULL
               OR m.status = 'unmapped'

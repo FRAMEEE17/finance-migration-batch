@@ -163,6 +163,39 @@ def unmapped_account_logged_not_excluded(con):
     return ok, f"in fact_gl_line={fact_rows} (want 2, non-blocking), unmapped_account logged={logged} (want >0)"
 
 
+def duplicate_document_mismatch_not_doubled(con):
+    """Fixed by mission 19: CI-DOC-DUP-001 fails both unbalanced_document
+    (document grain) and duplicate_source (line grain) at once - before
+    the fix, reconcile_mismatch.py's dq_violations join matched both for
+    each of line 1's 2 physical stg_gl rows and logged 4 recon_mismatch
+    rows there instead of 1. recon_mismatch keys on grain
+    (company_code, document_id, line_number, fiscal_year, fiscal_period),
+    not on physical stg_gl row count (your ruling on #19): a duplicated
+    grain is still one reporting position, so it gets one row, with the
+    document-grain check as cause, since the whole document was excluded
+    from fact_gl_line, not just the duplicated line. The physical
+    duplication itself stays visible in dq_violations, not folded into
+    recon_mismatch - both check names still logged there, nothing
+    deleted."""
+    line1 = con.execute(f"""
+        SELECT cause, COUNT(*) FROM recon_mismatch
+        WHERE {PF} AND document_id = 'CI-DOC-DUP-001' AND line_number = 1
+        GROUP BY 1
+    """).fetchall()
+    line2 = con.execute(f"""
+        SELECT cause, COUNT(*) FROM recon_mismatch
+        WHERE {PF} AND document_id = 'CI-DOC-DUP-001' AND line_number = 2
+        GROUP BY 1
+    """).fetchall()
+    both_logged = con.execute(f"""
+        SELECT COUNT(DISTINCT check_name) FROM dq_violations
+        WHERE {PF} AND document_id = 'CI-DOC-DUP-001' AND blocking = true
+          AND check_name IN ('unbalanced_document', 'duplicate_source')
+    """).fetchone()[0]
+    ok = line1 == [("unbalanced_document", 1)] and line2 == [("unbalanced_document", 1)] and both_logged == 2
+    return ok, f"line1={line1} (want [('unbalanced_document', 1)] - one row per grain, not per physical row), line2={line2} (want [('unbalanced_document', 1)]), dq_violations still carries both check names={both_logged == 2}"
+
+
 def idempotent_reload(before: tuple) -> tuple:
     """Takes the "before" snapshot already read by the caller, not a
     connection - a read-only connection held open in this process while
@@ -189,6 +222,7 @@ CHECKS = [
     ("opening balance flagged, not excluded", opening_balance_flagged_not_excluded),
     ("duplicate grain excluded", duplicate_grain_excluded),
     ("unmapped account logged, not excluded", unmapped_account_logged_not_excluded),
+    ("duplicate document mismatch not doubled", duplicate_document_mismatch_not_doubled),
 ]
 
 

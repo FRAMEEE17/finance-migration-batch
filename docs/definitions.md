@@ -153,9 +153,19 @@ and nothing gets added in SQL without being added here first:
 
 `opening_balance` · `closing_entry` · `post_close` · `unmapped_account` ·
 `unmapped_doc_type` · `unbalanced_document` · `duplicate_source` ·
-`reversal_pair` · `out_of_scope_period` · `local_amount_imbalance` ·
-`rounding` · fraud/anomaly (label = the row's `fraud_type` / `anomaly_type`) ·
+`map_fanout` · `null_key_column` · `reversal_pair` · `out_of_scope_period` ·
+`local_amount_imbalance` · `rounding` ·
+fraud/anomaly (label = the row's `fraud_type` / `anomaly_type`) ·
 `unknown` (temporary only)
+
+`map_fanout` and `null_key_column` were added in mission 19: both are real
+blocking `dq_violations` check names that could always have ended up as a
+`missing_in_fact` row's cause the same way `duplicate_source` already can,
+just never observed because no real row has hit either check yet.
+`catch_all_account` and (as a `recon_mismatch` cause, not a `dq_violations`
+check) `local_amount_imbalance` being non-blocking stay off this path -
+see "One cause when more than one check applies" below for why they can't
+reach it today.
 
 **Rules:**
 
@@ -173,6 +183,34 @@ and nothing gets added in SQL without being added here first:
   the period report cannot be signed.
 - An intended fix (the excluded-by-design cases above) must point to a cause
   already in this list. No label invented in the query.
+
+### One cause when more than one check applies (mission 19)
+
+A `stg_gl` line can fail more than one blocking check at once - its whole
+document is `unbalanced_document` and the line itself is also a
+`duplicate_source`, say. `dq_violations` keeps every finding that fired;
+nothing is deleted there. `recon_mismatch` still gets exactly one row for
+that line, with one cause, picked by priority:
+
+1. A blocking check at **document grain** (today, only
+   `unbalanced_document`). The document was excluded whole, so this is the
+   actual reason every one of its lines is missing, whatever else might
+   independently be true of one particular line.
+2. A blocking check at **line grain** (`duplicate_source`, `map_fanout`,
+   `null_key_column`, `unmapped_doc_type`).
+3. A non-blocking check (`unmapped_account`, `local_amount_imbalance`,
+   `catch_all_account`), only when no blocking check applies.
+
+Ties inside a tier break by that check's position in `quality_gate.py`'s
+own `CHECK_NAMES` tuple, reusing an order already declared there instead
+of inventing a second one.
+
+Tier 3 has no real or fixture case yet: a line can only be `missing_in_fact`
+(the only bucket that reads a cause from `dq_violations` at all) because a
+blocking check excluded it from `fact_gl_line` in the first place, so a
+non-blocking check is never the only candidate today. Implemented as a
+rule anyway, not left undefined, since the priority order should hold
+regardless of which tier happens to have a real example right now.
 
 ## map_account uniqueness (map_fanout)
 

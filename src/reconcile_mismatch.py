@@ -23,6 +23,15 @@ fact_gl_line agree is matched, full stop. pair_id / is_swap_valid attach
 to a matching row as informational attributes only, never changing its
 bucket or cause.
 
+A missing_in_fact line can have more than one dq_violations finding
+against it (mission 19: e.g. its whole document is unbalanced and the
+line itself is a physical duplicate). Every finding still gets logged in
+dq_violations - none of them are dropped there. This file only ever picks
+one as recon_mismatch's cause: document-grain blocking beats line-grain
+blocking beats non-blocking, because the document-grain reason is the
+real reason every line of that document is missing, not whatever else is
+also wrong with one particular line. See CAUSE_RANK_SQL below.
+
 Rebuild modes match reconcile_account.py: an explicit period list
 rewrites only those periods, no args rewrites every period currently in
 fact_gl_line, never a bare DELETE/CREATE OR REPLACE on the full table.
@@ -38,8 +47,17 @@ from typing import List, Optional, Tuple
 import duckdb  # type: ignore
 
 from config import WAREHOUSE_DB
+from quality_gate import CHECK_NAMES
 
 Period = Tuple[int, int, int]
+
+# mission 19: tie-break order when more than one dq_violations check_name
+# is a candidate cause for the same recon_mismatch row, reusing the order
+# quality_gate.py already declares its checks in rather than inventing a
+# second one. That tuple already runs blocking checks before non-blocking
+# ones and puts the one document-grain blocking check (unbalanced_document)
+# first, so it doubles as the tier order build_recon_mismatch needs.
+CAUSE_RANK_SQL = " ".join(f"WHEN '{name}' THEN {i}" for i, name in enumerate(CHECK_NAMES))
 
 
 def all_loaded_periods(con) -> List[Period]:
@@ -136,29 +154,58 @@ def build_recon_mismatch(con, periods: Optional[List[Period]] = None) -> int:
                     ELSE NULL
                 END AS cause
             FROM joined
+        ),
+        cause_pick AS (
+            SELECT
+                c.company_code, c.document_id, c.line_number, c.fiscal_year, c.fiscal_period,
+                c.bucket, c.gap,
+                COALESCE(c.cause, v.check_name) AS cause
+            FROM classified c
+            LEFT JOIN (
+                SELECT company_code, document_id, line_number, fiscal_year, fiscal_period,
+                       check_name, blocking
+                FROM dq_violations
+            ) v
+                ON v.company_code = c.company_code AND v.document_id = c.document_id
+               AND v.fiscal_year = c.fiscal_year AND v.fiscal_period = c.fiscal_period
+               AND (v.line_number IS NULL OR v.line_number = c.line_number)
+            -- mission 19: more than one blocking check can apply to the
+            -- same line (a document-wide unbalanced_document plus a
+            -- line-grain duplicate_source, say), and the join above
+            -- matches every one of them - one candidate row per match.
+            -- QUALIFY collapses back to the single row per source line
+            -- recon_mismatch is supposed to have, keeping the highest-
+            -- priority candidate: blocking + document-grain
+            -- (line_number IS NULL) beats blocking + line-grain beats
+            -- non-blocking. The document-grain reason is the true reason
+            -- every line of that document is missing from fact_gl_line,
+            -- not whatever else also happens to be wrong with one
+            -- particular line. Ties inside a tier break by CAUSE_RANK_SQL
+            -- (quality_gate.CHECK_NAMES' own declared order).
+            QUALIFY ROW_NUMBER() OVER (
+                PARTITION BY c.company_code, c.document_id, c.line_number, c.fiscal_year, c.fiscal_period
+                ORDER BY
+                    CASE WHEN v.blocking AND v.line_number IS NULL THEN 0
+                         WHEN v.blocking THEN 1
+                         WHEN v.check_name IS NOT NULL THEN 2
+                         ELSE 3
+                    END,
+                    CASE v.check_name {CAUSE_RANK_SQL} ELSE 99 END
+            ) = 1
         )
         SELECT
-            c.company_code, c.document_id, c.line_number, c.fiscal_year, c.fiscal_period,
-            c.bucket,
-            COALESCE(c.cause, v.check_name) AS cause,
-            c.gap,
+            cp.company_code, cp.document_id, cp.line_number, cp.fiscal_year, cp.fiscal_period,
+            cp.bucket, cp.cause, cp.gap,
             p.pair_id, p.is_swap_valid
-        FROM classified c
-        LEFT JOIN (
-            SELECT company_code, document_id, line_number, fiscal_year, fiscal_period, check_name
-            FROM dq_violations WHERE blocking = true
-        ) v
-            ON v.company_code = c.company_code AND v.document_id = c.document_id
-           AND v.fiscal_year = c.fiscal_year AND v.fiscal_period = c.fiscal_period
-           AND (v.line_number IS NULL OR v.line_number = c.line_number)
+        FROM cause_pick cp
         LEFT JOIN (
             SELECT original_document_id AS document_id, original_document_id || '_' || reversal_document_id AS pair_id, is_net_zero AS is_swap_valid
             FROM recon_reversal_pairs
             UNION ALL
             SELECT reversal_document_id AS document_id, original_document_id || '_' || reversal_document_id AS pair_id, is_net_zero AS is_swap_valid
             FROM recon_reversal_pairs
-        ) p ON p.document_id = c.document_id
-        WHERE c.bucket != 'matched'
+        ) p ON p.document_id = cp.document_id
+        WHERE cp.bucket != 'matched'
     """)
     return con.execute(f"SELECT COUNT(*) FROM recon_mismatch WHERE {scope}").fetchone()[0]
 

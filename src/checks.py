@@ -376,6 +376,32 @@ def unmapped_account_excludes_catch_all(con):
     return ok, f"unmapped_account={unmapped} (want 15), catch_all_account={catch_all} (want 70), overlap={overlap} (want 0)"
 
 
+def unmapped_account_excludes_map_fanout_accounts(con):
+    """No real map_account.csv duplicate exists (505 rows, 505 distinct) -
+    prove the exclusion added in mission 19 works anyway: a synthetic
+    gl_account whose map_account rows are fanned out must not be logged
+    by unmapped_account, since map_fanout already owns that finding.
+    Mirrors quality_gate.py's own fanout_exclusion clause. Never touches
+    stg_gl or map_account."""
+    got = con.execute("""
+        WITH stg AS (SELECT * FROM (VALUES (999888777)) AS t(gl_account)),
+             m AS (
+                 SELECT * FROM (VALUES (999888777, 'unmapped', NULL), (999888777, 'unmapped', NULL))
+                 AS t(source_account, status, target_account)
+             )
+        SELECT COUNT(*)
+        FROM stg s
+        LEFT JOIN m ON m.source_account = s.gl_account
+        WHERE s.gl_account NOT IN (SELECT source_account FROM m GROUP BY 1 HAVING COUNT(*) > 1)
+          AND (
+              m.source_account IS NULL
+              OR m.status = 'unmapped'
+              OR (m.status = 'deprecated' AND (m.target_account IS NULL OR m.target_account = ''))
+          )
+    """).fetchone()[0]
+    return got == 0, f"synthetic fanned-out gl_account logged by unmapped_account: {got} (want 0, map_fanout owns this finding)"
+
+
 def gate_never_filters_on_flags(con):
     """docs/business-rules.md / ADR-0003: is_fraud, is_anomaly never enter
     a gate predicate. Static check on the module source, not just this
@@ -533,6 +559,7 @@ VALID_BUCKETS = ("missing_in_fact", "missing_in_stg", "amount_changed", "intenti
 VALID_CAUSES = (
     "opening_balance", "closing_entry", "post_close", "unmapped_account",
     "unmapped_doc_type", "unbalanced_document", "duplicate_source",
+    "map_fanout", "null_key_column",  # added mission 19, see docs/definitions.md
     "reversal_pair", "out_of_scope_period", "local_amount_imbalance",
     "rounding", "unknown",
 )
@@ -643,6 +670,34 @@ def mismatch_amount_changed_and_missing_in_stg_synthetic(con):
     got = dict(rows)
     want = {"missing_in_stg_case": "missing_in_stg", "amount_changed_case": "amount_changed"}
     return got == want, f"got={got}" if got != want else "both synthetic cases classify correctly"
+
+
+def mismatch_cause_priority_document_grain_wins(con):
+    """No real document has ever failed two blocking checks at once
+    (mission 19's Exploration - checked directly against dq_violations
+    for the real P01-P03 scope) - prove the priority rule anyway with 2
+    synthetic candidate violations for the same line, one document-grain
+    blocking (line_number NULL) and one line-grain blocking, run through
+    the exact tier/rank expression build_recon_mismatch uses (reusing its
+    own CAUSE_RANK_SQL, not a hand-copied second version that could drift
+    from it). Never touches dq_violations or recon_mismatch."""
+    got = con.execute(f"""
+        SELECT check_name FROM (
+            VALUES
+                ('unbalanced_document', true, NULL),
+                ('duplicate_source', true, 1)
+        ) AS v(check_name, blocking, line_number)
+        QUALIFY ROW_NUMBER() OVER (
+            ORDER BY
+                CASE WHEN blocking AND line_number IS NULL THEN 0
+                     WHEN blocking THEN 1
+                     WHEN check_name IS NOT NULL THEN 2
+                     ELSE 3
+                END,
+                CASE check_name {reconcile_mismatch.CAUSE_RANK_SQL} ELSE 99 END
+        ) = 1
+    """).fetchone()[0]
+    return got == "unbalanced_document", f"synthetic tie between unbalanced_document (doc grain) and duplicate_source (line grain) picked {got!r} (want 'unbalanced_document')"
 
 
 def mismatch_pair_enrichment_present(con):
@@ -1015,6 +1070,7 @@ CHECKS = [
     ("null_key_column rejects a synthetic row", null_key_column_synthetic_reject),
     ("local_amount_imbalance logged, not excluded", local_amount_imbalance_logged_not_excluded),
     ("unmapped_account excludes catch_all", unmapped_account_excludes_catch_all),
+    ("unmapped_account excludes map_fanout accounts", unmapped_account_excludes_map_fanout_accounts),
     ("gate never filters on is_fraud/is_anomaly", gate_never_filters_on_flags),
     ("recon_period_summary row count", recon_period_summary_row_count),
     ("recon gaps computed correctly", recon_gaps_computed_correctly),
@@ -1033,6 +1089,7 @@ CHECKS = [
     ("mismatch gap computed, not asserted", mismatch_gap_computed_not_asserted),
     ("mismatch closing_entry synthetic case", mismatch_closing_entry_synthetic),
     ("mismatch amount_changed/missing_in_stg synthetic", mismatch_amount_changed_and_missing_in_stg_synthetic),
+    ("mismatch cause priority: document grain wins", mismatch_cause_priority_document_grain_wins),
     ("mismatch pair enrichment present", mismatch_pair_enrichment_present),
     ("mismatch pair enrichment never changes bucket", mismatch_pair_enrichment_never_changes_bucket),
     ("period report exists", period_report_exists),
