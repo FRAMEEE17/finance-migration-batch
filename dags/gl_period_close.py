@@ -33,7 +33,7 @@ if str(REPO_SRC) not in sys.path:
     sys.path.insert(0, str(REPO_SRC))
 
 import duckdb  # type: ignore
-from airflow.sdk import DAG, Param, task, get_current_context
+from airflow.sdk import DAG, Param, task, get_current_context # type: ignore
 
 from config import WAREHOUSE_DB  # type: ignore
 
@@ -48,18 +48,14 @@ with DAG(
     description="Close one fiscal period through the existing pipeline scripts, in order.",
     schedule=None,
     catchup=False,
-    # Single Runner pattern (Konieczny, Data Engineering Design Patterns,
-    # ch. Orchestration): warehouse.duckdb is one file, single-writer.
-    # reconcile_account and reconcile_mismatch already rebuild every
-    # loaded period on every call, regardless of which period triggered
-    # the run - two DAG Runs at once would race on the same file. This
-    # is a correctness requirement, not a throughput setting.
     max_active_runs=1,
+    # Safe because every task below is: load_stg/load_fact are proven by
+    # verify_rollback_safety, the three reconcile_* tasks and
+    # write_period_signoff all DELETE ... WHERE {pf} then INSERT (never
+    # append), re-verified twice this session with byte-identical P02/P03
+    # reruns. A retry redoes exactly what a first attempt would have.
+    default_args={"retries": 1},
     params={
-        # No defaults, on purpose - combined with schedule=None, Airflow
-        # validates these at trigger time instead of at DAG-parse time,
-        # so there is no default period a bare trigger could run
-        # silently (mission 20's own requirement).
         "company_code": Param(type="integer", title="Company code"),
         "fiscal_year": Param(type="integer", title="Fiscal year"),
         "fiscal_period": Param(type="integer", title="Fiscal period"),
@@ -167,10 +163,10 @@ with DAG(
 
     (
         load_stg()
-        >> load_fact()
+        >> load_fact() # type: ignore
         >> reconcile_account()
         >> reconcile_reversals()
         >> reconcile_mismatch()
         >> build_period_report()
         >> build_analyst_view()
-    )
+    ) # type: ignore
