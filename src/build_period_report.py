@@ -610,6 +610,23 @@ def build_exceptions_appendix(con, company_code: int, fiscal_year: int, fiscal_p
     return path
 
 
+def run(con, company_code: int, fiscal_year: int, fiscal_period: int) -> dict:
+    """Mission 20: the one entry point this file didn't already have.
+    Every other script in the pipeline separates a callable core from
+    main()'s argv handling; this one's core was actually 5 sequential
+    calls sharing one _fetch() result. This is that sequence, minus the
+    argv parsing and connection open/close - the same thing main() below
+    runs, and what the Airflow DAG task calls directly. Nothing inside
+    build_period_report/build_controller_pack/build_exceptions_appendix/
+    write_period_signoff changed."""
+    report = build_period_report(con, company_code, fiscal_year, fiscal_period)
+    controller_pack = build_controller_pack(con, company_code, fiscal_year, fiscal_period)
+    exceptions = build_exceptions_appendix(con, company_code, fiscal_year, fiscal_period)
+    data = _fetch(con, company_code, fiscal_year, fiscal_period)
+    write_period_signoff(con, data, company_code, fiscal_year, fiscal_period, report, controller_pack, exceptions)
+    return {"report": report, "controller_pack": controller_pack, "exceptions": exceptions}
+
+
 def main() -> int:
     if len(sys.argv) != 4:
         print("usage: python src/build_period_report.py <company_code> <fiscal_year> <fiscal_period>")
