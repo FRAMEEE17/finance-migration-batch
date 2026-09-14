@@ -183,4 +183,45 @@ then comment "approved" on #20.
 
 ## Retro
 
-(written after build and verification)
+Two path-resolution mistakes happened during the build, both caught by
+actually running the thing rather than by reading the code again. The
+first DAG file lived in `~/airflow/dags/` with a hardcoded
+`Path.home() / "finance-migration-batch"` - it parsed and ran fine, but
+it put the one artifact meant to be part of a portfolio outside the
+portfolio's own repo, with no copy tracked in git. Fixed by moving it
+into `dags/` in this repo and pointing Airflow's `dags_folder` at that
+path directly, then switching to `Path(__file__).resolve().parent.parent`
+the same way `config.py` already resolves paths - one canonical copy,
+no drift to manage between two.
+
+The params question from `docs/core-concepts/params.html` was worth
+verifying instead of guessing: the obvious-looking approach (declare
+`params: dict` as a task function argument) is not how Airflow's
+TaskFlow API actually exposes them. The documented, correct path is
+`get_current_context()` inside the task body. Checked this against the
+real installed package (`inspect.signature(Param.__init__)`) before
+writing a single task, since guessing wrong here means every
+period-scoped task silently gets the wrong company/year/period at
+trigger time - a failure mode that would not show up as an import
+error, only as wrong numbers, which is exactly the kind of thing this
+whole project exists to catch.
+
+Verification went two periods deep, not one. Running `dag.test()`
+against P03 alone would have been a reasonable proof; running it again
+against P02, from the moved file, after the path-resolution fix,
+turned "probably still works" into two independent, real matches
+against numbers already known from `src/checks.py`'s own pinned
+anchors - P02's `unmapped_account=12` and `local_amount_imbalance=30`
+came back from the DAG task's own return value, not a re-query,
+matching what mission 05 and mission 15's checks already established
+months of tickets ago. `reports/` stayed `git status` clean through
+both, confirming the idempotent-rebuild guarantee this project has
+relied on since mission 10's backfill holds through Airflow the same
+way it holds by hand.
+
+The build itself stayed exactly as narrow as the spec said it would -
+one new function in one file, zero SQL touched, zero change to any
+existing function. `git diff --stat` after the whole ticket shows
+`dags/gl_period_close.py` added and `src/build_period_report.py` with
+17 lines added, nothing else - the actual diff matches what the
+mission doc promised before any of it was written.
