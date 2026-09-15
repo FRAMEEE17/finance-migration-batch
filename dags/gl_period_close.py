@@ -48,6 +48,14 @@ from config import WAREHOUSE_DB  # type: ignore
 # out" logic needed; this is what that state transition already means.
 # smtp_default connection (issue #21's decision) points at a local debug
 # SMTP server for testing, not a real mailbox - see docs/runbook.md.
+#
+# html_content deliberately does NOT reference {{ exception }} - that
+# variable does not exist in this Task SDK version's notifier template
+# context (confirmed via a real jinja2.exceptions.UndefinedError while
+# root-causing why no alert ever delivered: the SMTP transaction got as
+# far as the DATA command, then died rendering the body). The full
+# exception text is already in the evidence JSON's "detail" field
+# (src/airflow_run_evidence.py), which this email links to instead.
 FAILURE_NOTIFIER = SmtpNotifier(
     from_email="gl-period-close@finance-migration-batch.local",
     to="oncall@finance-migration-batch.local",
@@ -57,7 +65,8 @@ FAILURE_NOTIFIER = SmtpNotifier(
         <p>Task: {{ ti.task_id }}, attempt {{ ti.try_number }}</p>
         <p>Requested period: company={{ params.company_code }}
            year={{ params.fiscal_year }} period={{ params.fiscal_period }}</p>
-        <p>Exception: {{ exception }}</p>
+        <p>Exception detail: see the evidence file below - not available
+           directly in this template.</p>
         <p>Evidence: reports/airflow_runs/{{ dag_run.run_id }}/{{ ti.task_id }}__attempt{{ ti.try_number }}.json</p>
     """,
 )
