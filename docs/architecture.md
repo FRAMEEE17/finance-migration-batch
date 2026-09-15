@@ -49,11 +49,15 @@ comparison: `stg_gl` (raw) against `fact_gl_line` (modeled), per period and
 per account. Every difference is classified into `recon_mismatch` with one
 bucket and one cause.
 
-A rendered version of this diagram is at `docs/architecture.png`.
+A rendered PNG of this diagram doesn't exist yet (issue #1, open) - this
+mermaid block is the current, accurate version, and it renders natively
+wherever GitHub shows this file.
 
-**Base layer (not drawn):** engine is DuckDB + Parquet; orchestration is
-sequential Python scripts; the FY2025 P02 rows sit in `stg_gl` unreconciled
-until their period is in scope.
+**Base layer:** engine is DuckDB + Parquet. Orchestration is
+`dags/gl_period_close.py` (Airflow), which calls the same `src/` functions
+the manual runbook sequence does - see the Scaling path section below,
+`Python scripts to an Airflow DAG` is done, not a future step. The FY2025
+P02 rows sit in `stg_gl` unreconciled until their period is in scope.
 
 **Where this sits in an actual close (ADR-0008):** an enterprise close
 runs on three layers - the subledger (SAP/Oracle/etc., the official
@@ -106,6 +110,6 @@ table.
 
 Same layers, swappable engines. The SQL and the contracts do not change.
 
-- DuckDB to Databricks or Azure Synapse: engine swap, star schema identical
-- Python scripts to an Airflow DAG: same jobs, adds retry, backfill, SLA
-- local parquet to an ADLS or S3 landing zone: same Full Loader semantics
+- DuckDB to Databricks or Azure Synapse: engine swap, star schema identical - not started
+- Python scripts to an Airflow DAG: same jobs, adds retry, backfill, SLA - done, `dags/gl_period_close.py` (mission 20)
+- local parquet to an ADLS or S3 landing zone: same Full Loader semantics - not started
