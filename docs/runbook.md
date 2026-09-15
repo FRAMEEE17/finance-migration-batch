@@ -62,6 +62,94 @@ looking at, not for the commands to finish.
 failing check's own name and detail line before touching any SQL - each
 one states what it measured, not just pass/fail.
 
+## Running it through Airflow
+
+`dags/gl_period_close.py` runs the same steps above as one DAG (mission
+20), plus a final gate task (mission 21):
+
+```bash
+airflow standalone
+```
+
+points `dags_folder` at this repo directly (see `airflow.cfg`), so
+nothing needs copying. First launch prints an admin login and serves the
+UI at `localhost:8080`. Trigger one period:
+
+```bash
+airflow dags trigger gl_period_close \
+  --conf '{"company_code":1000,"fiscal_year":2024,"fiscal_period":3}'
+```
+
+The 8th task, `period_close_gate`, reads what the 7 tasks before it
+produced - the signoff row, the three report files, the account
+reconciliation, the mismatch coverage - and decides whether the period
+is actually closeable, independently of whether the 7 tasks happened to
+exit zero (`src/period_close_gate.py`). A green DAG Run means the gate
+passed, not just that nothing raised.
+
+**If a task fails and retries run out** (`retries: 1` at the DAG level),
+two things happen automatically:
+
+- An email fires via Airflow's `SmtpNotifier`, configured against the
+  `smtp_default` connection. Subject names the task and attempt number;
+  body has the run id, requested period, and a pointer to the evidence
+  file below (the template deliberately doesn't reference the exception
+  text directly - `{{ exception }}` isn't in this Task SDK version's
+  notifier context, confirmed the hard way while building this; the
+  evidence file has the full detail instead).
+- Every task attempt - success, failure, or a rejected recovery -
+  writes a JSON record under `reports/airflow_runs/<run_id>/<task_id>__attempt<N>.json`
+  (gitignored, operational, not a versioned artifact). Each record
+  carries the SHA-256 of the source parquet and `map_account.csv` as
+  they stood at that attempt. `load_stg` and `load_fact` - the only two
+  tasks that actually read those files - refuse to run a retry whose
+  inputs changed since an earlier attempt of the same task in the same
+  run (`src/airflow_run_evidence.py`); a changed input means trigger a
+  fresh run, not clear this one.
+
+## Recovering from a failed task
+
+Clearing a task in the Airflow UI (or `airflow tasks clear`) reruns it
+and everything downstream, using the same run id and the same trigger
+`--conf` - that's what makes the version-evidence check above meaningful:
+a cleared retry is checked against its own earlier attempt, not treated
+as a fresh run.
+
+This was proven end to end, not just described, against a copy of the
+real warehouse (`cp warehouse.duckdb warehouse_demo.duckdb`, triggered
+with `demo_warehouse_path` pointed at the copy - see `_warehouse_path()`
+in the DAG file; every task takes the warehouse path from this per-run
+param instead of the hardcoded default, so a demo run touches nothing
+real). A fault was injected into `reconcile_mismatch` *after* its real
+rebuild already ran (382 real rows written first, then a deliberate
+failure - not a fault that blocks work from happening at all), gated
+behind a flag file rather than the trigger's `--conf`, since Airflow's
+Clear preserves a run's original conf and a param-only gate could never
+actually be "removed" by the same clear this demo exists to prove.
+
+Sequence: capture a baseline (every table for the target period, plus
+the three report files' hashes) → trigger with the fault flag present →
+task fails twice, alert delivers, evidence records both attempts as
+`failed` → delete the flag file (the input never changes - same source
+and mapping hash before and after) → clear `reconcile_mismatch` and
+everything downstream on the same run → `period_close_gate` passes on
+attempt 3 → diff every table and all three report files against the
+baseline (excluding load-time timestamp columns - `loaded_at`,
+`generated_at`). Every table, `fact_gl_line`, `recon_period_summary`,
+`recon_mismatch`, `fact_gl_line_ready`, `period_signoff`, and all three
+report files matched the baseline exactly.
+
+One real caveat worth knowing before repeating this: `build_period_report.py`'s
+three output paths aren't overridable per-run (by design - see that
+file's own docstring), so a demo run for a period that already has a
+real committed report **does** write over that real file during the
+run. It only came back identical here because the demo copy's data for
+that period was byte-identical to the real warehouse's. Re-running this
+against modified or synthetic data would actually clobber the real
+committed file until the next `git checkout` - pick a period without a
+committed report (like CI's `2099-01` scope in `tests/ci_checks.py`) if
+the demo data won't match the real committed report exactly.
+
 ## Where it breaks
 
 **A missing or wrong argument.** `load_fact.py` and

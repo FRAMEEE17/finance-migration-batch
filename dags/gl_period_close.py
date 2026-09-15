@@ -77,6 +77,19 @@ def _period_params(ctx) -> tuple[int, int, int]:
     return p["company_code"], p["fiscal_year"], p["fiscal_period"]
 
 
+def _warehouse_path(ctx) -> Path:
+    """Mission 21 demo hook (issue #25): demo_warehouse_path lets a
+    single trigger's --conf point every task at a throwaway copy of the
+    warehouse instead of the real one, with zero risk to real data -
+    empty string (the default) falls back to the real WAREHOUSE_DB, so
+    a normal trigger is unaffected. A per-run param, not an env var:
+    the live scheduler's own process env can't be changed per trigger,
+    but DagRun.conf can, and Clear preserves the original conf on
+    retry - exactly what a real clear-and-recover needs."""
+    p = ctx["params"].get("demo_warehouse_path")
+    return Path(p) if p else WAREHOUSE_DB
+
+
 def _with_evidence(task_id, fn, check_inputs=False):
     """Mission 21 (issue #23): wraps a task's real body, records the
     outcome (success/failed/rejected) as evidence after. check_inputs
@@ -124,17 +137,23 @@ with DAG(
         "company_code": Param(type="integer", title="Company code"),
         "fiscal_year": Param(type="integer", title="Fiscal year"),
         "fiscal_period": Param(type="integer", title="Fiscal period"),
+        # Demo-only (issue #25). Both default to "" (off) - a normal
+        # trigger never sets these, so a normal run is unaffected.
+        "demo_warehouse_path": Param(default="", type="string", title="Demo only: override warehouse.duckdb path"),
+        "demo_inject_fault_task": Param(default="", type="string", title="Demo only: task_id to fail after it completes its real work"),
     },
     tags=["finance-migration-batch"],
 ) as dag:
 
     @task
     def load_stg():
-        """Calls load_stg.main() unchanged. It takes no args - no CLI
-        branch to skip, so nothing to extract."""
+        """Calls load_stg.main(), passing the demo warehouse override
+        (issue #25) through explicitly - the one script whose only
+        warehouse-path hook was an env var baked in at import time, too
+        early for a per-run param to reach."""
         def _run():
             import load_stg
-            rc = load_stg.main()
+            rc = load_stg.main(warehouse_db=_warehouse_path(get_current_context()))
             if rc != 0:
                 raise RuntimeError(f"load_stg.main() exited {rc} - row count or schema check failed")
         return _with_evidence("load_stg", _run, check_inputs=True)
@@ -148,8 +167,9 @@ with DAG(
         separate task."""
         def _run():
             import load_fact
-            company, year, period = _period_params(get_current_context())
-            con = duckdb.connect(str(WAREHOUSE_DB))
+            ctx = get_current_context()
+            company, year, period = _period_params(ctx)
+            con = duckdb.connect(str(_warehouse_path(ctx)))
             try:
                 load_fact.load_map_account(con)
                 load_fact.ensure_tables(con)
@@ -166,7 +186,7 @@ with DAG(
         in fact_gl_line, not just the one this run closed."""
         def _run():
             import reconcile_account
-            con = duckdb.connect(str(WAREHOUSE_DB))
+            con = duckdb.connect(str(_warehouse_path(get_current_context())))
             try:
                 n = reconcile_account.build_recon_period_summary(con, None)
             finally:
@@ -183,7 +203,7 @@ with DAG(
         crash)."""
         def _run():
             import reconcile_reversals
-            con = duckdb.connect(str(WAREHOUSE_DB))
+            con = duckdb.connect(str(_warehouse_path(get_current_context())))
             try:
                 n = reconcile_reversals.build_recon_reversal_pairs(con)
             finally:
@@ -198,11 +218,34 @@ with DAG(
         reconcile_reversals: recon_reversal_pairs must already exist."""
         def _run():
             import reconcile_mismatch
-            con = duckdb.connect(str(WAREHOUSE_DB))
+            ctx = get_current_context()
+            con = duckdb.connect(str(_warehouse_path(ctx)))
             try:
                 n = reconcile_mismatch.build_recon_mismatch(con, None)
             finally:
                 con.close()
+            # Mission 21 demo hook (issue #25): fires only when a
+            # trigger's --conf explicitly names this task AND a flag
+            # file exists, and only after the real rebuild above
+            # already completed and wrote real data - proves recovery
+            # from a fault that happens mid-pipeline, not one that
+            # prevents any work from happening at all. Inert (never
+            # raises) on a normal run.
+            #
+            # Gated on a flag file, not just the param, on purpose:
+            # Airflow's Clear preserves a DagRun's original conf, so a
+            # param-only gate could never be "removed" by the same
+            # clear-and-retry this demo exists to prove - deleting the
+            # flag file is the external fix; the conf stays exactly as
+            # it was triggered with, same as any real recovery.
+            if ctx["params"].get("demo_inject_fault_task") == "reconcile_mismatch" and Path(
+                "/tmp/gl_period_close_demo_fault_flag"
+            ).exists():
+                raise RuntimeError(
+                    "mission 21 demo: deliberate fault injected after reconcile_mismatch "
+                    f"completed its rebuild ({n} rows written) - remove "
+                    "/tmp/gl_period_close_demo_fault_flag to recover"
+                )
             return {"rows": n}
         return _with_evidence("reconcile_mismatch", _run)
 
@@ -216,8 +259,9 @@ with DAG(
         changed."""
         def _run():
             import build_period_report
-            company, year, period = _period_params(get_current_context())
-            con = duckdb.connect(str(WAREHOUSE_DB))
+            ctx = get_current_context()
+            company, year, period = _period_params(ctx)
+            con = duckdb.connect(str(_warehouse_path(ctx)))
             try:
                 paths = build_period_report.run(con, company, year, period)
             finally:
@@ -232,7 +276,7 @@ with DAG(
         hand."""
         def _run():
             import build_analyst_view
-            con = duckdb.connect(str(WAREHOUSE_DB))
+            con = duckdb.connect(str(_warehouse_path(get_current_context())))
             try:
                 build_analyst_view.build_fact_gl_line_ready(con)
             finally:
@@ -248,8 +292,9 @@ with DAG(
         first) on failure, which fails this task and the DAG Run."""
         def _run():
             import period_close_gate
-            company, year, period = _period_params(get_current_context())
-            con = duckdb.connect(str(WAREHOUSE_DB), read_only=True)
+            ctx = get_current_context()
+            company, year, period = _period_params(ctx)
+            con = duckdb.connect(str(_warehouse_path(ctx)), read_only=True)
             try:
                 period_close_gate.run_period_close_gate(con, company, year, period)
             finally:

@@ -21,8 +21,15 @@ def _schema(con: duckdb.DuckDBPyConnection, relation: str) -> list[tuple[str, st
     return [(r[0], r[1]) for r in rows]
 
 
-def main() -> int:
-    con = duckdb.connect(str(WAREHOUSE_DB))
+def main(warehouse_db=None) -> int:
+    """warehouse_db overrides WAREHOUSE_DB for one call - mission 21's
+    recovery demo (issue #25) needs the DAG to point a single run at a
+    throwaway warehouse copy, and unlike every other task's own
+    duckdb.connect() call, this script had no way to take that override
+    except the env var, which is baked into WAREHOUSE_DB at import time
+    (too early for a per-run demo param to reach). Every other caller
+    passes nothing and gets the exact behavior this always had."""
+    con = duckdb.connect(str(warehouse_db or WAREHOUSE_DB))
 
     src_rel = f"(SELECT * FROM read_parquet('{SOURCE}'))"
     expected_rows = con.execute(f"SELECT COUNT(*) FROM {src_rel}").fetchone()[0]
