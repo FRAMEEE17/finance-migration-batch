@@ -82,6 +82,13 @@ gets one retry, which is safe here specifically because every task
 replaces a whole period rather than appending to it - rerun it and you
 get the same numbers back, not double the numbers.
 
+The DAG's eighth and last task, `period_close_gate` (mission 21), is new
+and not one of the seven pipeline scripts. It reads what the other seven
+already produced - the signoff row, the three report artifacts, the
+account reconciliation, the mismatch coverage - and decides whether the
+requested period is genuinely closeable. A green DAG Run means something
+now, not just that seven scripts happened to exit zero.
+
 <!-- demo: Airflow's graph view for gl_period_close, mid-run or after -->
 <!-- ![Airflow DAG graph](docs/images/airflow-dag-graph.png) -->
 

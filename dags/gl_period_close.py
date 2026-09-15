@@ -9,9 +9,12 @@ only sequences and parameterizes what src/checks.py already verifies
 against real data.
 
 quality_gate.py is not a task here - it already runs inside load_fact's
-load_period(). There is no checks task - src/checks.py pins exact
-numbers to periods 1-3 and can't be reused as a general period gate yet
-(mission 20's Non-goals; building that gate is its own ticket).
+load_period(). checks.py still isn't a task - it pins exact numbers to
+periods 1-3 and can't be a general period gate (mission 20's
+Non-goals). period_close_gate.py (mission 21) is that general gate: the
+DAG's last task, reading what every task before it already produced and
+deciding, for whatever period this run asked for, whether it's actually
+closeable.
 
 Lives in the repo, not in ~/airflow/dags/ - Airflow's dags_folder
 (airflow.cfg) points here directly, so this file is the one thing
@@ -171,6 +174,21 @@ with DAG(
         finally:
             con.close()
 
+    @task
+    def period_close_gate():
+        """run_period_close_gate(con, company, year, period) - mission 21.
+        Read-only: rebuilds nothing, just decides whether the period the
+        seven tasks above just produced is actually closeable. Raises
+        PeriodCloseGateError (with every reason found, not just the
+        first) on failure, which fails this task and the DAG Run."""
+        import period_close_gate
+        company, year, period = _period_params(get_current_context())
+        con = duckdb.connect(str(WAREHOUSE_DB))
+        try:
+            period_close_gate.run_period_close_gate(con, company, year, period)
+        finally:
+            con.close()
+
     (
         load_stg()
         >> load_fact() # type: ignore
@@ -179,4 +197,5 @@ with DAG(
         >> reconcile_mismatch()
         >> build_period_report()
         >> build_analyst_view()
+        >> period_close_gate()
     ) # type: ignore

@@ -18,6 +18,7 @@ import reconcile_account  # noqa: E402
 import reconcile_reversals  # noqa: E402
 import reconcile_mismatch  # noqa: E402
 import build_period_report  # noqa: E402
+import period_close_gate  # noqa: E402
 
 from config import REPO_ROOT, SOURCE_PARQUET, WAREHOUSE_DB
 
@@ -1040,6 +1041,143 @@ def how_to_query_doc_has_real_trap_example(con):
     return True, f"trap example present and matches a fresh query: {got:,.2f}"
 
 
+# Mission 21 / issue #22: period_close_gate.py
+
+def _gate_fixture_con():
+    """Builds an isolated in-memory warehouse with two periods outside
+    01-03 (real anchor scope), not against the shared read-only `con` -
+    period_close_gate.run_period_close_gate() joins 5 real tables, so
+    unlike the single-expression synthetic checks above, mirroring its
+    SQL in literal VALUES would mean re-deriving the join logic rather
+    than testing the actual function. Never touches warehouse.duckdb."""
+    m = duckdb.connect(":memory:")
+    m.execute("""
+        CREATE TABLE stg_gl (company_code BIGINT, gl_account BIGINT, fiscal_year BIGINT,
+            fiscal_period BIGINT, debit_amount DOUBLE, credit_amount DOUBLE)
+    """)
+    m.execute("""
+        CREATE TABLE fact_gl_line (company_code BIGINT, document_id VARCHAR, line_number BIGINT,
+            fiscal_year BIGINT, fiscal_period BIGINT, gl_account BIGINT, local_amount DOUBLE,
+            is_opening_balance BOOLEAN, is_closing_entry BOOLEAN, is_post_close BOOLEAN)
+    """)
+    m.execute("""
+        CREATE TABLE recon_period_summary (company_code BIGINT, gl_account BIGINT,
+            fiscal_year BIGINT, fiscal_period BIGINT, dc_gap DOUBLE)
+    """)
+    m.execute("""
+        CREATE TABLE recon_mismatch (company_code BIGINT, fiscal_year BIGINT,
+            fiscal_period BIGINT, cause VARCHAR)
+    """)
+    build_period_report.ensure_period_signoff_table(m)
+
+    # Period (9999, 2099, 1): clean, everything agrees - gate should pass.
+    m.execute("INSERT INTO stg_gl VALUES (9999, 100, 2099, 1, 500.0, 300.0)")
+    m.execute("INSERT INTO fact_gl_line VALUES (9999, 'D1', 1, 2099, 1, 100, 500.0, false, false, false)")
+    m.execute("INSERT INTO recon_period_summary VALUES (9999, 100, 2099, 1, 200.0)")
+    m.execute("INSERT INTO recon_mismatch VALUES (9999, 2099, 1, 'intentionally_excluded')")
+
+    # Period (9999, 2099, 2): identical shape, except fact_gl_line has a
+    # duplicate grain row - the one defect this fixture plants.
+    m.execute("INSERT INTO stg_gl VALUES (9999, 200, 2099, 2, 500.0, 300.0)")
+    m.execute("INSERT INTO fact_gl_line VALUES (9999, 'D2', 1, 2099, 2, 200, 500.0, false, false, false)")
+    m.execute("INSERT INTO fact_gl_line VALUES (9999, 'D2', 1, 2099, 2, 200, 500.0, false, false, false)")
+    m.execute("INSERT INTO recon_period_summary VALUES (9999, 200, 2099, 2, 200.0)")
+    m.execute("INSERT INTO recon_mismatch VALUES (9999, 2099, 2, 'intentionally_excluded')")
+
+    for year, period in [(2099, 1), (2099, 2)]:
+        m.execute(
+            """
+            INSERT INTO period_signoff VALUES
+            (9999, ?, ?, 'accepted', 'not_signed', 1, 1, 0.0, 0.0, 0, 0.0, ?, ?, ?, now())
+            """,
+            [year, period, f"report-{period}.md", f"controller-{period}.md", f"exceptions-{period}.md"],
+        )
+
+    import build_analyst_view
+    build_analyst_view.build_fact_gl_line_ready(m)
+    return m
+
+
+def period_close_gate_passes_isolated_fixture(con):
+    m = _gate_fixture_con()
+    tmp_report = tmp_controller = tmp_exceptions = None
+    try:
+        import tempfile
+        tmp_report = Path(tempfile.mktemp())
+        tmp_controller = Path(tempfile.mktemp())
+        tmp_exceptions = Path(tempfile.mktemp())
+        for p in (tmp_report, tmp_controller, tmp_exceptions):
+            p.write_text("fixture")
+        m.execute(
+            "UPDATE period_signoff SET report_path = ?, controller_pack_path = ?, exceptions_path = ? "
+            "WHERE fiscal_year = 2099 AND fiscal_period = 1",
+            [str(tmp_report), str(tmp_controller), str(tmp_exceptions)],
+        )
+        orig = (period_close_gate.report_path, period_close_gate.controller_pack_path, period_close_gate.exceptions_path)
+        period_close_gate.report_path = lambda fy, fp: tmp_report
+        period_close_gate.controller_pack_path = lambda fy, fp: tmp_controller
+        period_close_gate.exceptions_path = lambda fy, fp: tmp_exceptions
+        try:
+            period_close_gate.run_period_close_gate(m, 9999, 2099, 1)
+            return True, "gate passed on a clean isolated fixture period outside 01-03"
+        except period_close_gate.PeriodCloseGateError as e:
+            return False, f"expected pass, gate raised: {e}"
+        finally:
+            period_close_gate.report_path, period_close_gate.controller_pack_path, period_close_gate.exceptions_path = orig
+    finally:
+        for p in (tmp_report, tmp_controller, tmp_exceptions):
+            if p and p.exists():
+                p.unlink()
+        m.close()
+
+
+def period_close_gate_period_scoped_defect_isolated(con):
+    """The duplicate-grain defect planted in period 2 of the fixture must
+    fail only period 2 - period 1, built identically otherwise, must
+    still pass. Proves the gate is period-scoped, not a whole-warehouse
+    check that would fail every period the moment one is broken."""
+    m = _gate_fixture_con()
+    import tempfile
+    tmp = Path(tempfile.mktemp())
+    tmp.write_text("fixture")
+    m.execute(
+        "UPDATE period_signoff SET report_path = ?, controller_pack_path = ?, exceptions_path = ?",
+        [str(tmp), str(tmp), str(tmp)],
+    )
+    orig = (period_close_gate.report_path, period_close_gate.controller_pack_path, period_close_gate.exceptions_path)
+    period_close_gate.report_path = lambda fy, fp: tmp
+    period_close_gate.controller_pack_path = lambda fy, fp: tmp
+    period_close_gate.exceptions_path = lambda fy, fp: tmp
+    try:
+        period_close_gate.run_period_close_gate(m, 9999, 2099, 1)
+        period1_ok = True
+    except period_close_gate.PeriodCloseGateError:
+        period1_ok = False
+    period2_reason = None
+    try:
+        period_close_gate.run_period_close_gate(m, 9999, 2099, 2)
+        period2_ok = True
+    except period_close_gate.PeriodCloseGateError as e:
+        period2_ok = False
+        period2_reason = str(e)
+    finally:
+        period_close_gate.report_path, period_close_gate.controller_pack_path, period_close_gate.exceptions_path = orig
+        tmp.unlink()
+        m.close()
+    ok = period1_ok and not period2_ok and period2_reason and "duplicate grain" in period2_reason
+    return ok, f"period1_passed={period1_ok}  period2_failed={not period2_ok}  reason={period2_reason}"
+
+
+def period_close_gate_fails_on_missing_signoff(con):
+    """No fixture needed - period 1000/2024/999 has never been loaded, so
+    it has no period_signoff row on the real warehouse. Runs against the
+    shared read-only con directly."""
+    try:
+        period_close_gate.run_period_close_gate(con, 1000, 2024, 999)
+        return False, "expected PeriodCloseGateError, gate passed"
+    except period_close_gate.PeriodCloseGateError as e:
+        return "no period_signoff row" in str(e), f"gate correctly failed: {e}"
+
 
 CHECKS = [
     ("stg_gl exists", stg_gl_exists),
@@ -1114,6 +1252,9 @@ CHECKS = [
     ("fact_gl_line_ready movement flag correct", fact_gl_line_ready_movement_flag_correct),
     ("fact_gl_line_ready row count matches fact", fact_gl_line_ready_row_count_matches_fact),
     ("how-to-query doc has real trap example", how_to_query_doc_has_real_trap_example),
+    ("period close gate passes isolated fixture", period_close_gate_passes_isolated_fixture),
+    ("period close gate is period-scoped", period_close_gate_period_scoped_defect_isolated),
+    ("period close gate fails on missing signoff", period_close_gate_fails_on_missing_signoff),
 ]
 
 
