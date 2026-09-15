@@ -36,9 +36,31 @@ if str(REPO_SRC) not in sys.path:
     sys.path.insert(0, str(REPO_SRC))
 
 import duckdb  # type: ignore
+from airflow.providers.smtp.notifications.smtp import SmtpNotifier  # type: ignore
 from airflow.sdk import DAG, Param, task, get_current_context # type: ignore
 
 from config import WAREHOUSE_DB  # type: ignore
+
+# Mission 21, issue #24: fires once a task's retries are exhausted -
+# Airflow only calls on_failure_callback when a task instance actually
+# reaches the `failed` state, which a retry that still has attempts left
+# does not (it goes to `up_for_retry` instead). No extra "did retries run
+# out" logic needed; this is what that state transition already means.
+# smtp_default connection (issue #21's decision) points at a local debug
+# SMTP server for testing, not a real mailbox - see docs/runbook.md.
+FAILURE_NOTIFIER = SmtpNotifier(
+    from_email="gl-period-close@finance-migration-batch.local",
+    to="oncall@finance-migration-batch.local",
+    subject="gl_period_close FAILED: {{ ti.task_id }} (attempt {{ ti.try_number }})",
+    html_content="""
+        <p>DAG run: {{ dag_run.run_id }}</p>
+        <p>Task: {{ ti.task_id }}, attempt {{ ti.try_number }}</p>
+        <p>Requested period: company={{ params.company_code }}
+           year={{ params.fiscal_year }} period={{ params.fiscal_period }}</p>
+        <p>Exception: {{ exception }}</p>
+        <p>Evidence: reports/airflow_runs/{{ dag_run.run_id }}/{{ ti.task_id }}__attempt{{ ti.try_number }}.json</p>
+    """,
+)
 
 
 def _period_params(ctx) -> tuple[int, int, int]:
@@ -46,19 +68,25 @@ def _period_params(ctx) -> tuple[int, int, int]:
     return p["company_code"], p["fiscal_year"], p["fiscal_period"]
 
 
-def _with_evidence(task_id, fn):
-    """Mission 21 (issue #23): wraps a task's real body. Checks this
-    attempt's source/mapping hashes against the same DAG run's earlier
-    attempt of this same task before running anything - a clear+retry
-    whose inputs changed underneath it is rejected, not silently
-    honored - then records the outcome (success or failure) after.
-    See src/airflow_run_evidence.py."""
+def _with_evidence(task_id, fn, check_inputs=False):
+    """Mission 21 (issue #23): wraps a task's real body, records the
+    outcome (success/failed/rejected) as evidence after. check_inputs
+    additionally checks this attempt's source/mapping hashes against
+    the same DAG run's earlier attempt of this same task before running
+    anything, rejecting a clear+retry whose inputs changed underneath
+    it - only load_stg and load_fact pass check_inputs=True, since
+    they're the only two tasks that actually read those files
+    (scrutinize finding: checking it on every task let an unrelated
+    task's retry get rejected over a file it never reads). See
+    src/airflow_run_evidence.py."""
     import airflow_run_evidence
     ctx = get_current_context()
     company, year, period = _period_params(ctx)
     run_id = ctx["dag_run"].run_id
     attempt = ctx["ti"].try_number
-    return airflow_run_evidence.run_with_evidence(run_id, task_id, attempt, company, year, period, fn)
+    return airflow_run_evidence.run_with_evidence(
+        run_id, task_id, attempt, company, year, period, fn, check_inputs=check_inputs
+    )
 
 
 with DAG(
@@ -78,7 +106,7 @@ with DAG(
     # write_period_signoff all DELETE ... WHERE {pf} then INSERT (never
     # append), re-verified twice this session with byte-identical P02/P03
     # reruns. A retry redoes exactly what a first attempt would have.
-    default_args={"retries": 1},
+    default_args={"retries": 1, "on_failure_callback": FAILURE_NOTIFIER},
     params={
         # No defaults, on purpose - combined with schedule=None, Airflow
         # validates these at trigger time instead of at DAG-parse time,
@@ -100,7 +128,7 @@ with DAG(
             rc = load_stg.main()
             if rc != 0:
                 raise RuntimeError(f"load_stg.main() exited {rc} - row count or schema check failed")
-        return _with_evidence("load_stg", _run)
+        return _with_evidence("load_stg", _run, check_inputs=True)
 
     @task
     def load_fact():
@@ -120,7 +148,7 @@ with DAG(
                 return load_fact.load_period(con, company, year, period)
             finally:
                 con.close()
-        return _with_evidence("load_fact", _run)
+        return _with_evidence("load_fact", _run, check_inputs=True)
 
     @task
     def reconcile_account():
@@ -212,7 +240,7 @@ with DAG(
         def _run():
             import period_close_gate
             company, year, period = _period_params(get_current_context())
-            con = duckdb.connect(str(WAREHOUSE_DB))
+            con = duckdb.connect(str(WAREHOUSE_DB), read_only=True)
             try:
                 period_close_gate.run_period_close_gate(con, company, year, period)
             finally:

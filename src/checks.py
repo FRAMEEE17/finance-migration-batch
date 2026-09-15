@@ -1272,6 +1272,66 @@ def run_evidence_allows_unchanged_input_recovery(con):
         _clean_evidence_run(run_id)
 
 
+def run_evidence_rejected_attempt_is_recorded(con):
+    """Scrutinize finding: run_with_evidence() used to call
+    check_inputs_unchanged() outside its try block, so a rejected
+    recovery raised RunEvidenceError before record_attempt() ever ran -
+    the one event this module exists to catch was the one event never
+    written to reports/airflow_runs/. A second attempt with a tampered
+    prior-attempt hash must still leave a 'rejected' record behind, not
+    just raise and vanish."""
+    run_id = "checks_py__evidence_rejection_recorded"
+    _clean_evidence_run(run_id)
+    try:
+        p = airflow_run_evidence.record_attempt(run_id, "load_stg", 1, 9999, 2099, 1, "failed")
+        import json
+        rec = json.loads(p.read_text())
+        rec["source_sha256"] = "0" * 64
+        p.write_text(json.dumps(rec))
+
+        def _boom():
+            raise AssertionError("should never run - rejected before fn() executes")
+
+        try:
+            airflow_run_evidence.run_with_evidence(
+                run_id, "load_stg", 2, 9999, 2099, 1, _boom, check_inputs=True
+            )
+            return False, "expected RunEvidenceError, none raised"
+        except airflow_run_evidence.RunEvidenceError:
+            pass
+        prior = airflow_run_evidence.prior_attempts(run_id, "load_stg")
+        outcomes = [p["outcome"] for p in prior]
+        ok = outcomes == ["failed", "rejected"]
+        return ok, f"recorded outcomes={outcomes} (want ['failed', 'rejected'])"
+    finally:
+        _clean_evidence_run(run_id)
+
+
+def run_evidence_check_inputs_false_skips_rejection(con):
+    """A task that passes check_inputs=False must never be rejected over
+    a changed source/mapping hash - only load_stg and load_fact actually
+    read those files (scrutinize finding: checking it on every task
+    could reject reconcile_mismatch's retry over a file it never
+    touches). Tampers a synthetic prior attempt's hash the same way the
+    rejection test above does, but for a task running with
+    check_inputs=False, and confirms it runs through anyway."""
+    run_id = "checks_py__evidence_check_inputs_false"
+    _clean_evidence_run(run_id)
+    try:
+        p = airflow_run_evidence.record_attempt(run_id, "reconcile_mismatch", 1, 9999, 2099, 1, "failed")
+        import json
+        rec = json.loads(p.read_text())
+        rec["source_sha256"] = "0" * 64
+        p.write_text(json.dumps(rec))
+
+        result = airflow_run_evidence.run_with_evidence(
+            run_id, "reconcile_mismatch", 2, 9999, 2099, 1, lambda: "ran", check_inputs=False
+        )
+        return result == "ran", f"result={result!r} (want 'ran' - not rejected despite tampered hash)"
+    finally:
+        _clean_evidence_run(run_id)
+
+
 CHECKS = [
     ("stg_gl exists", stg_gl_exists),
     ("stg_gl row count == source", stg_gl_row_count_matches_source),
@@ -1352,6 +1412,8 @@ CHECKS = [
     ("run evidence records every attempt distinctly", run_evidence_records_every_attempt),
     ("run evidence rejects changed-input recovery", run_evidence_rejects_changed_input_recovery),
     ("run evidence allows unchanged-input recovery", run_evidence_allows_unchanged_input_recovery),
+    ("run evidence records a rejected attempt", run_evidence_rejected_attempt_is_recorded),
+    ("run evidence check_inputs=False skips rejection", run_evidence_check_inputs_false_skips_rejection),
 ]
 
 

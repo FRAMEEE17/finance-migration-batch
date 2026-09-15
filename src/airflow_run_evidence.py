@@ -2,16 +2,21 @@
 
 Records, for every task attempt: the DAG run id, task id, attempt
 number, requested period, outcome, and a SHA-256 hash of the source
-parquet and map_account.csv actually read by that attempt.
+parquet and map_account.csv as they stood at that attempt - every task
+gets this record, whether or not it reads those files itself, since the
+point is a full per-run trail, not just a per-file one.
 
-Defensive, not just informational: a recovery is a clear-and-rerun
-inside the same DAG run_id. Before running a task's real body, this
-compares the current source/mapping hashes against that same run's
-earlier attempt of that task. If either file changed underneath it,
-the attempt is rejected outright - Airflow's retry model assumes a task
-is idempotent against unchanged inputs (mission 20's own retries=1
-justification), and this is what makes that assumption checkable
-instead of assumed. A changed input means a fresh DAG run, not a clear.
+Defensive, not just informational, for the two tasks that actually
+consume those files: a recovery is a clear-and-rerun inside the same
+DAG run_id. Before load_stg or load_fact's real body runs,
+run_with_evidence(..., check_inputs=True) compares the current
+source/mapping hashes against that same run's earlier attempt of that
+same task, and rejects the attempt if either changed - Airflow's retry
+model assumes a task is idempotent against unchanged inputs (mission
+20's own retries=1 justification), and this is what makes that
+assumption checkable instead of assumed. Every other task passes
+check_inputs=False (source/mapping identity has nothing to do with
+whether reconcile_mismatch's retry is safe) but still gets recorded.
 
 Plain JSON files under reports/airflow_runs/, one per attempt. Never
 touches warehouse.duckdb - evidence survives independently of the
@@ -60,13 +65,17 @@ def _run_dir(run_id: str) -> Path:
 
 
 def prior_attempts(run_id: str, task_id: str) -> List[dict]:
+    """Sorted by the recorded `attempt` number, not file mtime - mtime
+    resolution is coarse enough on some filesystems that two attempts
+    written close together could sort in the wrong order, and the real
+    ordering key is already in the filename and the record itself."""
     d = _run_dir(run_id)
     if not d.exists():
         return []
-    return [
-        json.loads(p.read_text())
-        for p in sorted(d.glob(f"{task_id}__attempt*.json"), key=lambda p: p.stat().st_mtime)
-    ]
+    return sorted(
+        (json.loads(p.read_text()) for p in d.glob(f"{task_id}__attempt*.json")),
+        key=lambda rec: rec["attempt"],
+    )
 
 
 def check_inputs_unchanged(run_id: str, task_id: str) -> None:
@@ -119,15 +128,26 @@ def run_with_evidence(
     run_id: str, task_id: str, attempt: int,
     company_code: int, fiscal_year: int, fiscal_period: int,
     fn: Callable[[], T],
+    check_inputs: bool = True,
 ) -> T:
-    """Wraps one task's real body. Checks this attempt's inputs against
-    any earlier attempt of the same task in the same run before running
-    anything, then records success or failure after. Re-raises whatever
-    fn() raised (including RunEvidenceError itself), so Airflow still
-    marks the task failed."""
-    check_inputs_unchanged(run_id, task_id)
+    """Wraps one task's real body. If check_inputs is set, compares this
+    attempt's source/mapping hashes against any earlier attempt of the
+    same task in the same run before running anything - only load_stg
+    and load_fact actually read those files, so only those two tasks
+    pass check_inputs=True (scrutinize finding: checking it on every
+    task means a task that never reads the source can get its retry
+    rejected over a file it doesn't use). Every task still records an
+    attempt either way, success, failure, or a rejected recovery - the
+    rejection itself used to raise before record_attempt ever ran,
+    which left the one event this module exists to catch missing from
+    its own evidence trail."""
     try:
+        if check_inputs:
+            check_inputs_unchanged(run_id, task_id)
         result = fn()
+    except RunEvidenceError as e:
+        record_attempt(run_id, task_id, attempt, company_code, fiscal_year, fiscal_period, "rejected", detail=str(e))
+        raise
     except Exception as e:
         record_attempt(run_id, task_id, attempt, company_code, fiscal_year, fiscal_period, "failed", detail=str(e))
         raise

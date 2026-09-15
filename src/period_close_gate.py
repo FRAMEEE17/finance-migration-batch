@@ -168,7 +168,7 @@ def main() -> int:
         return 1
     company_code, fiscal_year, fiscal_period = (int(v) for v in sys.argv[1:4])
 
-    con = duckdb.connect(str(WAREHOUSE_DB))
+    con = duckdb.connect(str(WAREHOUSE_DB), read_only=True)
     try:
         run_period_close_gate(con, company_code, fiscal_year, fiscal_period)
     except PeriodCloseGateError as e:
