@@ -130,7 +130,21 @@ python3 src/build_analyst_view.py
 python3 src/checks.py
 ```
 
-**Through Airflow**, once it's running locally:
+**Through Airflow.** Start the local instance (webserver, scheduler,
+triggerer, and dag-processor bundled into one dev command):
+
+```bash
+export PATH="$(pwd)/.venv/bin:$PATH"  # or wherever the Airflow venv lives
+airflow standalone
+```
+
+`standalone` is Airflow's own dev-only entry point - not what a real
+deployment runs, but the fastest way to see the DAG execute. It prints an
+admin login on first launch and serves the UI at `localhost:8080`.
+`dags/gl_period_close.py` needs no separate registration step; Airflow's
+dag-processor scans the `dags/` folder on its own and picks it up.
+
+Trigger a run from the UI, or from the command line:
 
 ```bash
 airflow dags trigger gl_period_close \
