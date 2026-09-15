@@ -84,16 +84,22 @@ def _check_account_reconciliation(con, pf: str, company_code: int, fiscal_year: 
         WITH recomputed AS (
             SELECT gl_account, ROUND(SUM(debit_amount) - SUM(credit_amount), 2) AS dc_gap
             FROM stg_gl WHERE {pf} GROUP BY 1
+        ),
+        mismatched AS (
+            SELECT recomputed.gl_account, recomputed.dc_gap, r.dc_gap AS stored_dc_gap
+            FROM recomputed
+            JOIN recon_period_summary r
+              ON r.gl_account = recomputed.gl_account
+             AND r.company_code = {company_code} AND r.fiscal_year = {fiscal_year} AND r.fiscal_period = {fiscal_period}
+            WHERE ABS(recomputed.dc_gap - r.dc_gap) > 0.02
         )
-        SELECT recomputed.gl_account, recomputed.dc_gap, r.dc_gap
-        FROM recomputed
-        JOIN recon_period_summary r
-          ON r.gl_account = recomputed.gl_account
-         AND r.company_code = {company_code} AND r.fiscal_year = {fiscal_year} AND r.fiscal_period = {fiscal_period}
-        WHERE ABS(recomputed.dc_gap - r.dc_gap) > 0.02
+        SELECT COUNT(*) OVER () AS total, gl_account, dc_gap, stored_dc_gap
+        FROM mismatched LIMIT 5
     """).fetchall()
     if bad:
-        reasons.append(f"{len(bad)} account(s) where recon_period_summary.dc_gap disagrees with a fresh recompute from stg_gl by more than 0.02: {bad[:5]}")
+        total = bad[0][0]
+        sample = [row[1:] for row in bad]
+        reasons.append(f"{total} account(s) where recon_period_summary.dc_gap disagrees with a fresh recompute from stg_gl by more than 0.02: {sample}")
 
     missing = con.execute(f"""
         SELECT COUNT(DISTINCT gl_account) FROM stg_gl s WHERE {pf}
@@ -128,12 +134,18 @@ def _check_fact_grain_unique(con, pf: str, reasons: List[str]) -> None:
     mean load_fact's period-replace broke, silently, sometime after
     verify_rollback_safety last checked it."""
     dupes = con.execute(f"""
-        SELECT company_code, document_id, line_number, COUNT(*)
-        FROM fact_gl_line WHERE {pf}
-        GROUP BY 1, 2, 3 HAVING COUNT(*) > 1
+        WITH grouped AS (
+            SELECT company_code, document_id, line_number, COUNT(*) AS n
+            FROM fact_gl_line WHERE {pf}
+            GROUP BY 1, 2, 3 HAVING COUNT(*) > 1
+        )
+        SELECT COUNT(*) OVER () AS total, company_code, document_id, line_number, n
+        FROM grouped LIMIT 5
     """).fetchall()
     if dupes:
-        reasons.append(f"{len(dupes)} duplicate grain row(s) in fact_gl_line for this period: {dupes[:5]}")
+        total = dupes[0][0]
+        sample = [row[1:] for row in dupes]
+        reasons.append(f"{total} duplicate grain row(s) in fact_gl_line for this period: {sample}")
 
 
 def _check_analyst_view(con, pf: str, reasons: List[str]) -> None:
