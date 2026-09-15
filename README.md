@@ -202,11 +202,18 @@ in its own text: it's evidence, not a signature. Full reasoning is in
 
 ## Status
 
-17 of 20 tracked tickets closed. `src/checks.py` runs 72 checks against
-the real dataset, every single one pinned to a real number rather than a
-fixture, and right now it's 72 for 72. Real scope today is company
-`1000`, fiscal year 2024, periods 01 through 03 - I haven't tried to
-pretend this covers more than it does.
+18 of 21 tracked missions closed. `src/checks.py` runs 81 checks against
+the real dataset and isolated fixtures, every real-data one pinned to a
+real number rather than a placeholder, and right now it's 81 for 81.
+Real scope today is company `1000`, fiscal year 2024, periods 01
+through 03 - I haven't tried to pretend this covers more than it does.
+
+Mission 21 closed out the Airflow DAG's remaining gaps: a real
+period-close gate as the last task (not just seven scripts exiting
+zero), per-attempt run evidence with source/mapping version hashing, a
+failure alert that actually delivers, and a controlled-failure recovery
+proven against a real copy of the warehouse, not simulated - see
+[`docs/missions/21-airflow-recovery-period-close-gate.md`](docs/missions/21-airflow-recovery-period-close-gate.md).
 
 Open on purpose, not forgotten:
 
@@ -219,11 +226,10 @@ Open on purpose, not forgotten:
 
 And a few things I'm deliberately not building yet, named here instead of
 left silent: swapping DuckDB for a cloud warehouse like Databricks or
-Synapse (same SQL, different engine underneath), a declarative
-data-quality framework instead of the hand-written checks, and a
-general-purpose period gate for the Airflow DAG's last task. None of
-these are blocked on anything. They're just not needed yet at the scale
-this project actually runs at.
+Synapse (same SQL, different engine underneath), and a declarative
+data-quality framework instead of the hand-written checks. Neither is
+blocked on anything. They're just not needed yet at the scale this
+project actually runs at.
 
 ## Tech
 

@@ -21,8 +21,19 @@ The DE checklist items this repo enforces, and where.
 | Alert on missing / dup / late | blocking DQ + late-arrival rule |
 | Validate downstream after update | rerun + diff before sign-off |
 | Document pipeline + owner | Ticket 12 runbook |
+| Orchestration + retries | `dags/gl_period_close.py` (mission 20) |
+| Orchestration-level close gate | `src/period_close_gate.py`, DAG's last task (mission 21) |
+| Per-run version evidence | `src/airflow_run_evidence.py`, SHA-256 of source + mapping per attempt (mission 21) |
+| Failure alerting | `SmtpNotifier` on exhausted retries, verified against a real SMTP server (mission 21) |
+| Recovery proven, not assumed | controlled-failure demo against a real warehouse copy, diffed against baseline (mission 21) |
 
-Deliberately **not** done in the first pass:
-CI/CD, Airflow/dbt, env isolation, schema-evolution tooling, SLA monitoring,
-freshness dashboards, cost monitoring, catalogs. Added only when the
-reconciliation loop is signed off and a real need appears.
+CI/CD (`tests/ci_checks.py` + `.github/workflows/`, ticket 18) and the
+Airflow orchestration rows above have since shipped; both used to be on
+the list below.
+
+Deliberately **not** done, still: dbt, env isolation (dev/staging/prod
+split), schema-evolution tooling, freshness dashboards, cost
+monitoring, catalogs, a secrets backend for connection credentials
+(current `smtp_default` connection is local dev only - see
+`docs/runbook.md`'s Airflow section). Added only when the reconciliation
+loop is signed off and a real need appears.
