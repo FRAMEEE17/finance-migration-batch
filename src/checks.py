@@ -19,6 +19,7 @@ import reconcile_reversals  # noqa: E402
 import reconcile_mismatch  # noqa: E402
 import build_period_report  # noqa: E402
 import period_close_gate  # noqa: E402
+import airflow_run_evidence  # noqa: E402
 
 from config import REPO_ROOT, SOURCE_PARQUET, WAREHOUSE_DB
 
@@ -1179,6 +1180,98 @@ def period_close_gate_fails_on_missing_signoff(con):
         return "no period_signoff row" in str(e), f"gate correctly failed: {e}"
 
 
+# Mission 21 / issue #23: airflow_run_evidence.py
+
+def _clean_evidence_run(run_id):
+    import shutil
+    d = airflow_run_evidence._run_dir(run_id)
+    if d.exists():
+        shutil.rmtree(d)
+    return d
+
+
+def run_evidence_hash_matches_independent_computation(con):
+    """sha256_file() on the real source parquet and map_account.csv must
+    match a hash computed here independently, not just be internally
+    consistent with itself."""
+    import hashlib
+
+    def _independent_sha256(path):
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            h.update(f.read())
+        return h.hexdigest()
+
+    got_source = airflow_run_evidence.sha256_file(Path(SOURCE))
+    want_source = _independent_sha256(SOURCE)
+    got_map = airflow_run_evidence.sha256_file(MAP_CSV)
+    want_map = _independent_sha256(MAP_CSV)
+    ok = got_source == want_source and got_map == want_map
+    return ok, f"source: {got_source == want_source}  mapping: {got_map == want_map}"
+
+
+def run_evidence_records_every_attempt(con):
+    """record_attempt() for two different task_ids in the same run_id
+    produces two distinguishable files, not one overwriting the other -
+    and a second attempt of the same task_id (attempt=2) doesn't
+    overwrite attempt=1 either. Never touches the real warehouse or a
+    real run_id."""
+    run_id = "checks_py__evidence_distinct_attempts"
+    d = _clean_evidence_run(run_id)
+    try:
+        airflow_run_evidence.record_attempt(run_id, "load_stg", 1, 9999, 2099, 1, "success")
+        airflow_run_evidence.record_attempt(run_id, "load_stg", 2, 9999, 2099, 1, "success")
+        airflow_run_evidence.record_attempt(run_id, "load_fact", 1, 9999, 2099, 1, "success")
+        prior = airflow_run_evidence.prior_attempts(run_id, "load_stg")
+        got = [p["attempt"] for p in prior]
+        ok = got == [1, 2] and (d / "load_fact__attempt1.json").exists()
+        return ok, f"load_stg attempts recorded={got} (want [1, 2]), load_fact attempt recorded separately"
+    finally:
+        _clean_evidence_run(run_id)
+
+
+def run_evidence_rejects_changed_input_recovery(con):
+    """A second attempt in the same run_id whose recorded prior-attempt
+    hash disagrees with the current file must raise RunEvidenceError,
+    not silently proceed as if nothing changed. Tampers only a synthetic
+    recorded file under reports/airflow_runs/, never a real run's
+    evidence and never the real source/mapping files."""
+    import json
+
+    run_id = "checks_py__evidence_changed_input"
+    d = _clean_evidence_run(run_id)
+    try:
+        p = airflow_run_evidence.record_attempt(run_id, "load_stg", 1, 9999, 2099, 1, "failed")
+        rec = json.loads(p.read_text())
+        rec["source_sha256"] = "0" * 64  # deliberately wrong
+        p.write_text(json.dumps(rec))
+        try:
+            airflow_run_evidence.check_inputs_unchanged(run_id, "load_stg")
+            return False, "expected RunEvidenceError, recovery was silently allowed"
+        except airflow_run_evidence.RunEvidenceError as e:
+            return True, f"correctly rejected: {e}"
+    finally:
+        _clean_evidence_run(run_id)
+
+
+def run_evidence_allows_unchanged_input_recovery(con):
+    """The mirror case: a second attempt whose inputs genuinely match the
+    first attempt's recorded hashes must be allowed through - the
+    rejection in the check above is about a *changed* input, not about
+    ever having a prior attempt at all."""
+    run_id = "checks_py__evidence_unchanged_input"
+    _clean_evidence_run(run_id)
+    try:
+        airflow_run_evidence.record_attempt(run_id, "load_stg", 1, 9999, 2099, 1, "failed")
+        try:
+            airflow_run_evidence.check_inputs_unchanged(run_id, "load_stg")
+            return True, "unchanged inputs correctly allowed through"
+        except airflow_run_evidence.RunEvidenceError as e:
+            return False, f"unexpected rejection on unchanged inputs: {e}"
+    finally:
+        _clean_evidence_run(run_id)
+
+
 CHECKS = [
     ("stg_gl exists", stg_gl_exists),
     ("stg_gl row count == source", stg_gl_row_count_matches_source),
@@ -1255,6 +1348,10 @@ CHECKS = [
     ("period close gate passes isolated fixture", period_close_gate_passes_isolated_fixture),
     ("period close gate is period-scoped", period_close_gate_period_scoped_defect_isolated),
     ("period close gate fails on missing signoff", period_close_gate_fails_on_missing_signoff),
+    ("run evidence hash matches independent computation", run_evidence_hash_matches_independent_computation),
+    ("run evidence records every attempt distinctly", run_evidence_records_every_attempt),
+    ("run evidence rejects changed-input recovery", run_evidence_rejects_changed_input_recovery),
+    ("run evidence allows unchanged-input recovery", run_evidence_allows_unchanged_input_recovery),
 ]
 
 

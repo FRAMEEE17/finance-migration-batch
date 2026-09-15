@@ -4,6 +4,10 @@ dataset/*.parquet
 *.db
 practice.db
 
+# per-attempt Airflow run evidence (mission 21) - operational, grows with
+# every run, not a versioned artifact like reports/period_*.md
+reports/airflow_runs/
+
 marker_out/
 AWS-Retail-Data-ETL-Pipeline/
 ArsenalFC-Data-Pipeline-Project/

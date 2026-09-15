@@ -46,6 +46,21 @@ def _period_params(ctx) -> tuple[int, int, int]:
     return p["company_code"], p["fiscal_year"], p["fiscal_period"]
 
 
+def _with_evidence(task_id, fn):
+    """Mission 21 (issue #23): wraps a task's real body. Checks this
+    attempt's source/mapping hashes against the same DAG run's earlier
+    attempt of this same task before running anything - a clear+retry
+    whose inputs changed underneath it is rejected, not silently
+    honored - then records the outcome (success or failure) after.
+    See src/airflow_run_evidence.py."""
+    import airflow_run_evidence
+    ctx = get_current_context()
+    company, year, period = _period_params(ctx)
+    run_id = ctx["dag_run"].run_id
+    attempt = ctx["ti"].try_number
+    return airflow_run_evidence.run_with_evidence(run_id, task_id, attempt, company, year, period, fn)
+
+
 with DAG(
     dag_id="gl_period_close",
     description="Close one fiscal period through the existing pipeline scripts, in order.",
@@ -80,10 +95,12 @@ with DAG(
     def load_stg():
         """Calls load_stg.main() unchanged. It takes no args - no CLI
         branch to skip, so nothing to extract."""
-        import load_stg
-        rc = load_stg.main()
-        if rc != 0:
-            raise RuntimeError(f"load_stg.main() exited {rc} - row count or schema check failed")
+        def _run():
+            import load_stg
+            rc = load_stg.main()
+            if rc != 0:
+                raise RuntimeError(f"load_stg.main() exited {rc} - row count or schema check failed")
+        return _with_evidence("load_stg", _run)
 
     @task
     def load_fact():
@@ -92,30 +109,33 @@ with DAG(
         verify_rollback_safety + load_period. quality_gate.py's
         run_gate() executes inside load_period() - it is not a
         separate task."""
-        import load_fact
-        company, year, period = _period_params(get_current_context())
-        con = duckdb.connect(str(WAREHOUSE_DB))
-        try:
-            load_fact.load_map_account(con)
-            load_fact.ensure_tables(con)
-            load_fact.verify_rollback_safety(con, company, year, period)
-            result = load_fact.load_period(con, company, year, period)
-        finally:
-            con.close()
-        return result
+        def _run():
+            import load_fact
+            company, year, period = _period_params(get_current_context())
+            con = duckdb.connect(str(WAREHOUSE_DB))
+            try:
+                load_fact.load_map_account(con)
+                load_fact.ensure_tables(con)
+                load_fact.verify_rollback_safety(con, company, year, period)
+                return load_fact.load_period(con, company, year, period)
+            finally:
+                con.close()
+        return _with_evidence("load_fact", _run)
 
     @task
     def reconcile_account():
         """build_recon_period_summary(con, None) - no period arg, same
         as docs/runbook.md's own call. Rebuilds every period currently
         in fact_gl_line, not just the one this run closed."""
-        import reconcile_account
-        con = duckdb.connect(str(WAREHOUSE_DB))
-        try:
-            n = reconcile_account.build_recon_period_summary(con, None)
-        finally:
-            con.close()
-        return {"rows": n}
+        def _run():
+            import reconcile_account
+            con = duckdb.connect(str(WAREHOUSE_DB))
+            try:
+                n = reconcile_account.build_recon_period_summary(con, None)
+            finally:
+                con.close()
+            return {"rows": n}
+        return _with_evidence("reconcile_account", _run)
 
     @task
     def reconcile_reversals():
@@ -124,26 +144,30 @@ with DAG(
         warehouse, which is exactly why it is a task in this chain and
         not something run once and forgotten (mission 18's real
         crash)."""
-        import reconcile_reversals
-        con = duckdb.connect(str(WAREHOUSE_DB))
-        try:
-            n = reconcile_reversals.build_recon_reversal_pairs(con)
-        finally:
-            con.close()
-        return {"pairs": n}
+        def _run():
+            import reconcile_reversals
+            con = duckdb.connect(str(WAREHOUSE_DB))
+            try:
+                n = reconcile_reversals.build_recon_reversal_pairs(con)
+            finally:
+                con.close()
+            return {"pairs": n}
+        return _with_evidence("reconcile_reversals", _run)
 
     @task
     def reconcile_mismatch():
         """build_recon_mismatch(con, None) - same no-args, rebuild-every-
         loaded-period behavior as reconcile_account. Runs after
         reconcile_reversals: recon_reversal_pairs must already exist."""
-        import reconcile_mismatch
-        con = duckdb.connect(str(WAREHOUSE_DB))
-        try:
-            n = reconcile_mismatch.build_recon_mismatch(con, None)
-        finally:
-            con.close()
-        return {"rows": n}
+        def _run():
+            import reconcile_mismatch
+            con = duckdb.connect(str(WAREHOUSE_DB))
+            try:
+                n = reconcile_mismatch.build_recon_mismatch(con, None)
+            finally:
+                con.close()
+            return {"rows": n}
+        return _with_evidence("reconcile_mismatch", _run)
 
     @task
     def build_period_report():
@@ -153,26 +177,30 @@ with DAG(
         build_exceptions_appendix, _fetch, write_period_signoff) minus
         argv parsing. Nothing inside those 4 existing functions
         changed."""
-        import build_period_report
-        company, year, period = _period_params(get_current_context())
-        con = duckdb.connect(str(WAREHOUSE_DB))
-        try:
-            paths = build_period_report.run(con, company, year, period)
-        finally:
-            con.close()
-        return {k: str(v) for k, v in paths.items()}
+        def _run():
+            import build_period_report
+            company, year, period = _period_params(get_current_context())
+            con = duckdb.connect(str(WAREHOUSE_DB))
+            try:
+                paths = build_period_report.run(con, company, year, period)
+            finally:
+                con.close()
+            return {k: str(v) for k, v in paths.items()}
+        return _with_evidence("build_period_report", _run)
 
     @task
     def build_analyst_view():
         """build_fact_gl_line_ready(con). Rebuilds fact_gl_line_ready
         for every accepted period, same as running the script by
         hand."""
-        import build_analyst_view
-        con = duckdb.connect(str(WAREHOUSE_DB))
-        try:
-            build_analyst_view.build_fact_gl_line_ready(con)
-        finally:
-            con.close()
+        def _run():
+            import build_analyst_view
+            con = duckdb.connect(str(WAREHOUSE_DB))
+            try:
+                build_analyst_view.build_fact_gl_line_ready(con)
+            finally:
+                con.close()
+        return _with_evidence("build_analyst_view", _run)
 
     @task
     def period_close_gate():
@@ -181,13 +209,15 @@ with DAG(
         seven tasks above just produced is actually closeable. Raises
         PeriodCloseGateError (with every reason found, not just the
         first) on failure, which fails this task and the DAG Run."""
-        import period_close_gate
-        company, year, period = _period_params(get_current_context())
-        con = duckdb.connect(str(WAREHOUSE_DB))
-        try:
-            period_close_gate.run_period_close_gate(con, company, year, period)
-        finally:
-            con.close()
+        def _run():
+            import period_close_gate
+            company, year, period = _period_params(get_current_context())
+            con = duckdb.connect(str(WAREHOUSE_DB))
+            try:
+                period_close_gate.run_period_close_gate(con, company, year, period)
+            finally:
+                con.close()
+        return _with_evidence("period_close_gate", _run)
 
     (
         load_stg()
