@@ -85,9 +85,29 @@ def _warehouse_path(ctx) -> Path:
     a normal trigger is unaffected. A per-run param, not an env var:
     the live scheduler's own process env can't be changed per trigger,
     but DagRun.conf can, and Clear preserves the original conf on
-    retry - exactly what a real clear-and-recover needs."""
+    retry - exactly what a real clear-and-recover needs.
+
+    Requires the path to already exist. duckdb.connect() silently
+    creates an empty file for any path that doesn't exist yet - found
+    this the hard way after the trigger UI's form showed this field as
+    required (it isn't, backend-side) and a user could plausibly type
+    any placeholder in just to get past that, pointing the real close
+    at a brand-new empty warehouse with no error at all. A typo or a
+    placeholder now fails loud instead of quietly reconciling nothing."""
     p = ctx["params"].get("demo_warehouse_path")
-    return Path(p) if p else WAREHOUSE_DB
+    if not p:
+        return WAREHOUSE_DB
+    path = Path(p)
+    if not path.exists():
+        raise RuntimeError(
+            f"demo_warehouse_path={p!r} does not exist. This must point at an "
+            f"already-existing copy of the warehouse (e.g. cp warehouse.duckdb "
+            f"warehouse_demo.duckdb first) - duckdb.connect() would otherwise "
+            f"silently create a new, empty file here and the whole run would "
+            f"reconcile nothing against no data. Leave this field blank for a "
+            f"normal run against the real warehouse."
+        )
+    return path
 
 
 # debug-mantra audit (mission 21): warehouse.duckdb and reports/airflow_runs/
