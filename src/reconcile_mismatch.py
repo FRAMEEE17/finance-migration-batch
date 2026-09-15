@@ -24,13 +24,10 @@ to a matching row as informational attributes only, never changing its
 bucket or cause.
 
 A missing_in_fact line can have more than one dq_violations finding
-against it (mission 19: e.g. its whole document is unbalanced and the
-line itself is a physical duplicate). Every finding still gets logged in
-dq_violations - none of them are dropped there. This file only ever picks
-one as recon_mismatch's cause: document-grain blocking beats line-grain
-blocking beats non-blocking, because the document-grain reason is the
-real reason every line of that document is missing, not whatever else is
-also wrong with one particular line. See CAUSE_RANK_SQL below.
+against it (mission 19). Every finding still gets logged in
+dq_violations - none are dropped there. This file picks exactly one as
+recon_mismatch's cause; see build_recon_mismatch()'s own docstring for
+which one and why.
 
 Rebuild modes match reconcile_account.py: an explicit period list
 rewrites only those periods, no args rewrites every period currently in

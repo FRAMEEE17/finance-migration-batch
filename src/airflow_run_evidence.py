@@ -130,17 +130,10 @@ def run_with_evidence(
     fn: Callable[[], T],
     check_inputs: bool = True,
 ) -> T:
-    """Wraps one task's real body. If check_inputs is set, compares this
-    attempt's source/mapping hashes against any earlier attempt of the
-    same task in the same run before running anything - only load_stg
-    and load_fact actually read those files, so only those two tasks
-    pass check_inputs=True (scrutinize finding: checking it on every
-    task means a task that never reads the source can get its retry
-    rejected over a file it doesn't use). Every task still records an
-    attempt either way, success, failure, or a rejected recovery - the
-    rejection itself used to raise before record_attempt ever ran,
-    which left the one event this module exists to catch missing from
-    its own evidence trail."""
+    """Wraps one task's real body: check_inputs_unchanged() first when
+    check_inputs is set, then fn(), then record_attempt() with the
+    outcome - success, failed, or rejected. See the module docstring for
+    which tasks should pass check_inputs and why."""
     try:
         if check_inputs:
             check_inputs_unchanged(run_id, task_id)
