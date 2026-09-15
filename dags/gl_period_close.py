@@ -77,25 +77,40 @@ def _period_params(ctx) -> tuple[int, int, int]:
     return p["company_code"], p["fiscal_year"], p["fiscal_period"]
 
 
+DEMO_OFF = "none"  # sentinel default for both demo params, see below
+
+
 def _warehouse_path(ctx) -> Path:
     """Mission 21 demo hook (issue #25): demo_warehouse_path lets a
     single trigger's --conf point every task at a throwaway copy of the
     warehouse instead of the real one, with zero risk to real data -
-    empty string (the default) falls back to the real WAREHOUSE_DB, so
-    a normal trigger is unaffected. A per-run param, not an env var:
-    the live scheduler's own process env can't be changed per trigger,
-    but DagRun.conf can, and Clear preserves the original conf on
-    retry - exactly what a real clear-and-recover needs.
+    the DEMO_OFF sentinel (the default) falls back to the real
+    WAREHOUSE_DB, so a normal trigger is unaffected. A per-run param,
+    not an env var: the live scheduler's own process env can't be
+    changed per trigger, but DagRun.conf can, and Clear preserves the
+    original conf on retry - exactly what a real clear-and-recover
+    needs.
 
-    Requires the path to already exist. duckdb.connect() silently
-    creates an empty file for any path that doesn't exist yet - found
-    this the hard way after the trigger UI's form showed this field as
-    required (it isn't, backend-side) and a user could plausibly type
-    any placeholder in just to get past that, pointing the real close
+    Default is the literal string "none", not "" - a user reported the
+    trigger UI marking this field required with an empty-string
+    default, which the browser wasn't available to verify directly in
+    this session. Best available evidence: Airflow's own
+    params_trigger_ui example DAG only uses non-empty defaults (True,
+    a populated list) for its optional-looking params, never an empty
+    string. "none" matches that pattern - visibly filled in,
+    self-explanatory, can never collide with a real path - but treat
+    this as the leading hypothesis, not a confirmed root cause, until
+    someone checks the actual rendered form.
+
+    Requires the path to already exist when set to anything else.
+    duckdb.connect() silently creates an empty file for any path that
+    doesn't exist yet - found this the hard way after the trigger UI's
+    required-looking field could plausibly pressure someone into
+    typing a placeholder just to get past it, pointing the real close
     at a brand-new empty warehouse with no error at all. A typo or a
     placeholder now fails loud instead of quietly reconciling nothing."""
     p = ctx["params"].get("demo_warehouse_path")
-    if not p:
+    if not p or p == DEMO_OFF:
         return WAREHOUSE_DB
     path = Path(p)
     if not path.exists():
@@ -195,8 +210,8 @@ with DAG(
         "fiscal_period": Param(type="integer", title="Fiscal period"),
         # Demo-only (issue #25). Both default to "" (off) - a normal
         # trigger never sets these, so a normal run is unaffected.
-        "demo_warehouse_path": Param(default="", type="string", title="Demo only: override warehouse.duckdb path"),
-        "demo_inject_fault_task": Param(default="", type="string", title="Demo only: task_id to fail after it completes its real work"),
+        "demo_warehouse_path": Param(default=DEMO_OFF, type="string", title="Demo only: override warehouse.duckdb path (leave as \"none\" for a normal run)"),
+        "demo_inject_fault_task": Param(default=DEMO_OFF, type="string", title="Demo only: task_id to fail after it completes its real work (leave as \"none\" for a normal run)"),
     },
     tags=["finance-migration-batch"],
 ) as dag:
