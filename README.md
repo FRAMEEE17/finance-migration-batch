@@ -197,7 +197,7 @@ for why that's a deliberate constraint, not an oversight)
 
 ## Repo layout
 
-```
+```text
 .
 ├── src/                  pipeline scripts, one stage each
 ├── dags/                 gl_period_close.py - the Airflow DAG
