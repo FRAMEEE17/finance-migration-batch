@@ -90,6 +90,37 @@ def _warehouse_path(ctx) -> Path:
     return Path(p) if p else WAREHOUSE_DB
 
 
+# debug-mantra audit (mission 21): warehouse.duckdb and reports/airflow_runs/
+# (#23's evidence) are plain local filesystem paths, never anything
+# executor-aware. Every real test this session ran under LocalExecutor
+# (airflow.cfg: executor = LocalExecutor), where every task attempt is
+# guaranteed to land on the same machine and see the same disk. Under
+# CeleryExecutor or KubernetesExecutor, two attempts of the same task can
+# land on different workers/pods with no shared disk - the warehouse
+# connection would silently point at a different or missing file, and
+# check_inputs_unchanged() would silently see "no prior attempt" every
+# single time, defeating the changed-input-rejection check with no error
+# at all. Worse than a crash: a safety check that looks like it's working
+# and isn't. Fail loud here instead, before any task's real work starts.
+_SHARED_FILESYSTEM_EXECUTORS = {"LocalExecutor", "SequentialExecutor", "DebugExecutor"}
+
+
+def _assert_shared_filesystem_executor() -> None:
+    from airflow.configuration import conf
+    executor = conf.get("core", "executor")
+    if executor not in _SHARED_FILESYSTEM_EXECUTORS:
+        raise RuntimeError(
+            f"gl_period_close requires every task attempt to see the same local "
+            f"filesystem (warehouse.duckdb, reports/airflow_runs/ evidence) - "
+            f"configured executor is {executor!r}, not one of "
+            f"{sorted(_SHARED_FILESYSTEM_EXECUTORS)}. Safe under a distributed "
+            f"executor only if warehouse.duckdb and reports/ both sit on shared "
+            f"storage mounted identically on every worker - if that's genuinely "
+            f"true here, this check is wrong for your deployment and should be "
+            f"loosened deliberately, not silently bypassed."
+        )
+
+
 def _with_evidence(task_id, fn, check_inputs=False):
     """Mission 21 (issue #23): wraps a task's real body, records the
     outcome (success/failed/rejected) as evidence after. check_inputs
@@ -100,7 +131,12 @@ def _with_evidence(task_id, fn, check_inputs=False):
     they're the only two tasks that actually read those files
     (scrutinize finding: checking it on every task let an unrelated
     task's retry get rejected over a file it never reads). See
-    src/airflow_run_evidence.py."""
+    src/airflow_run_evidence.py.
+
+    _assert_shared_filesystem_executor() runs first, for the same reason
+    check_inputs_unchanged() matters at all: this whole mechanism is
+    worthless if two attempts can't actually see each other's evidence."""
+    _assert_shared_filesystem_executor()
     import airflow_run_evidence
     ctx = get_current_context()
     company, year, period = _period_params(ctx)

@@ -127,6 +127,23 @@ two things happen automatically:
   run (`src/airflow_run_evidence.py`); a changed input means trigger a
   fresh run, not clear this one.
 
+**This DAG requires an executor where every task attempt sees the same
+local filesystem** - `warehouse.duckdb` and the evidence files above are
+both plain local paths, never anything executor-aware. Every task checks
+this itself (`_assert_shared_filesystem_executor()`) and fails loud,
+before doing any real work, if `airflow.cfg`'s `executor` isn't
+`LocalExecutor`, `SequentialExecutor`, or `DebugExecutor`. This isn't
+paranoia: under `CeleryExecutor` or `KubernetesExecutor`, two attempts of
+the same task can land on different workers or pods with no shared disk.
+Without this check, the warehouse connection would silently point at a
+different or missing file, and the version-evidence check above would
+silently see "no prior attempt" on every single retry - not an error,
+just a safety check that looks like it's working and quietly isn't. A
+real distributed deployment is fine *if* `warehouse.duckdb` and
+`reports/` both sit on shared storage mounted identically on every
+worker - loosen `_SHARED_FILESYSTEM_EXECUTORS` deliberately in that case,
+don't just delete the check.
+
 ## Recovering from a failed task
 
 Clearing a task in the Airflow UI (or `airflow tasks clear`) reruns it
