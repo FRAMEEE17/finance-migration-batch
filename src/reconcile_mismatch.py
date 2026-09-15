@@ -95,6 +95,17 @@ def ensure_table(con) -> None:
 
 
 def build_recon_mismatch(con, periods: Optional[List[Period]] = None) -> int:
+    """One row per stg_gl/fact_gl_line line that doesn't match, one bucket
+    and one cause each - never two, even when a line trips more than one
+    blocking check at once (mission 19: a document-wide
+    unbalanced_document plus a line-grain duplicate_source, say). The
+    cause_pick CTE's QUALIFY picks the single highest-priority candidate
+    per line: blocking + document-grain (line_number IS NULL) beats
+    blocking + line-grain beats non-blocking, ties broken by
+    CAUSE_RANK_SQL (quality_gate.CHECK_NAMES' own declared order). The
+    document-grain reason wins because it's the true reason every line of
+    that document is missing from fact_gl_line, not whatever else also
+    happens to be wrong with one particular line."""
     ensure_table(con)
     if periods is None:
         periods = all_loaded_periods(con)
@@ -169,19 +180,7 @@ def build_recon_mismatch(con, periods: Optional[List[Period]] = None) -> int:
                 ON v.company_code = c.company_code AND v.document_id = c.document_id
                AND v.fiscal_year = c.fiscal_year AND v.fiscal_period = c.fiscal_period
                AND (v.line_number IS NULL OR v.line_number = c.line_number)
-            -- mission 19: more than one blocking check can apply to the
-            -- same line (a document-wide unbalanced_document plus a
-            -- line-grain duplicate_source, say), and the join above
-            -- matches every one of them - one candidate row per match.
-            -- QUALIFY collapses back to the single row per source line
-            -- recon_mismatch is supposed to have, keeping the highest-
-            -- priority candidate: blocking + document-grain
-            -- (line_number IS NULL) beats blocking + line-grain beats
-            -- non-blocking. The document-grain reason is the true reason
-            -- every line of that document is missing from fact_gl_line,
-            -- not whatever else also happens to be wrong with one
-            -- particular line. Ties inside a tier break by CAUSE_RANK_SQL
-            -- (quality_gate.CHECK_NAMES' own declared order).
+            -- one row per source line, highest-priority cause wins - see build_recon_mismatch()'s docstring
             QUALIFY ROW_NUMBER() OVER (
                 PARTITION BY c.company_code, c.document_id, c.line_number, c.fiscal_year, c.fiscal_period
                 ORDER BY
