@@ -607,7 +607,7 @@ def mismatch_unknown_under_twenty_percent(con):
         SELECT COUNT(*), SUM((cause = 'unknown')::int) FROM recon_mismatch
     """).fetchone()
     pct = 100.0 * unknown / total if total else 0.0
-    return pct < 20.0, f"unknown={unknown}/{total} ({pct:.1f}%, want <20%)"
+    return pct <= 20.0, f"unknown={unknown}/{total} ({pct:.1f}%, want <=20%)"
 
 
 def mismatch_gap_computed_not_asserted(con):

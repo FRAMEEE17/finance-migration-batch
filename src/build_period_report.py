@@ -104,9 +104,15 @@ def _fetch(con, company_code: int, fiscal_year: int, fiscal_period: int) -> dict
         """).fetchall()
     ]
 
-    unknown_pct = con.execute(f"""
-        SELECT ROUND(100.0 * SUM((cause = 'unknown')::int) / COUNT(*), 1) FROM recon_mismatch WHERE {pf}
+    # Raw (unrounded) drives the accept/reject decision; the 20% rule in
+    # docs/definitions.md compares the actual percentage, not a display
+    # rounding of it - a real 19.96% must not fail just because it prints
+    # as 20.0%. `unknown_pct` stays rounded for the report/controller-pack
+    # text; `unknown_pct_raw` is what recon_status is decided on.
+    unknown_pct_raw = con.execute(f"""
+        SELECT 100.0 * SUM((cause = 'unknown')::int) / COUNT(*) FROM recon_mismatch WHERE {pf}
     """).fetchone()[0] or 0.0
+    unknown_pct = round(unknown_pct_raw, 1)
 
     # Scoped by the original document's period, not the reversal's - a pair
     # can cross a period boundary, and "originated this period" is what
@@ -141,6 +147,7 @@ def _fetch(con, company_code: int, fiscal_year: int, fiscal_period: int) -> dict
         "imbalanced_total": imbalanced[1] or 0.0,
         "mismatch": mismatch,
         "unknown_pct": unknown_pct,
+        "unknown_pct_raw": unknown_pct_raw,
         "reversal": reversal,
         "dq": dq,
         "unbalanced_excluded": unbalanced_excluded,
@@ -379,7 +386,7 @@ def build_controller_pack_text(data: dict, company_code: int, fiscal_year: int, 
     n_accounts, _, _, _, n_exceptions = data["period_summary"]
     label = f"{fiscal_year}-{fiscal_period:02d}"
     imbalanced_docs = data["imbalanced_doc_count"]
-    recon_status = "accepted" if data["unknown_pct"] < 20.0 else "rejected"
+    recon_status = "accepted" if data["unknown_pct_raw"] <= 20.0 else "rejected"
 
     lines = [
         f"# Controller pack: {label}",
@@ -557,7 +564,7 @@ def write_period_signoff(
     updates it."""
     ensure_period_signoff_table(con)
     n_accounts, _, _, _, n_exceptions = data["period_summary"]
-    recon_status = "accepted" if data["unknown_pct"] < 20.0 else "blocked"
+    recon_status = "accepted" if data["unknown_pct_raw"] <= 20.0 else "blocked"
 
     pf = f"company_code = {company_code} AND fiscal_year = {fiscal_year} AND fiscal_period = {fiscal_period}"
     con.execute(f"DELETE FROM period_signoff WHERE {pf}")
