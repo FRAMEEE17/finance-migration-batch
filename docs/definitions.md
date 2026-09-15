@@ -180,7 +180,11 @@ reach it today.
 - `is_fraud` / `is_anomaly` are never grounds to delete a row. They only
   label a mismatch, if one exists.
 - If `unknown` mismatches exceed 20% of the period's total mismatch count,
-  the period report cannot be signed.
+  the period report cannot be signed. The 20% comparison runs on the raw,
+  unrounded percentage - a period at exactly 20.00% passes, and a real
+  value like 19.96% must not fail just because it displays as 20.0% after
+  rounding for the report. Rounding is a display concern only; it never
+  feeds back into the pass/fail decision (mission 21, issue #21).
 - An intended fix (the excluded-by-design cases above) must point to a cause
   already in this list. No label invented in the query.
 
