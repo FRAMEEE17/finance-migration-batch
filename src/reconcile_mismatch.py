@@ -1,41 +1,22 @@
 """Document-level reconciliation with bucket + cause. Ticket 8,
-parameterized by period in ticket 10.
+parameterized by period in ticket 10. Builds recon_mismatch: stg_gl vs
+the close-eligible subset of fact_gl_line (excludes is_opening_balance /
+is_closing_entry / is_post_close - the full table would only ever
+produce missing_in_fact for those, since they load a row rather than
+excluding it). Bucket and cause definitions: docs/definitions.md.
 
-Builds recon_mismatch: stg_gl vs the close-eligible subset of
-fact_gl_line (excludes is_opening_balance / is_closing_entry /
-is_post_close rows - comparing against the full table would only ever
-produce missing_in_fact, since those flags load a row rather than
-excluding it).
-
-Bucket assignment:
-  - missing_in_fact: in stg_gl, absent from fact_gl_line. Cause comes
-    from the dq_violations check that rejected it.
-  - intentionally_excluded: present in fact_gl_line but flagged out of
-    the close-eligible view. Cause is whichever flag is set.
-  - amount_changed: present in both, close-eligible, local_amount
-    differs by more than 0.01.
-  - missing_in_stg: in fact_gl_line, absent from stg_gl. Should never
-    happen; kept as a guard.
-  - matched: not written as a row. Present in both, gap within 0.01.
-
-reversal_pair is not a bucket here - a reversal pair whose stg_gl and
-fact_gl_line agree is matched, full stop. pair_id / is_swap_valid attach
-to a matching row as informational attributes only, never changing its
-bucket or cause.
+reversal_pair is not a bucket - a reversal pair whose two sides agree is
+matched, full stop. pair_id / is_swap_valid attach to a matching row as
+informational attributes only.
 
 A missing_in_fact line can have more than one dq_violations finding
-against it (mission 19). Every finding still gets logged in
-dq_violations - none are dropped there. This file picks exactly one as
-recon_mismatch's cause; see build_recon_mismatch()'s own docstring for
-which one and why.
+(mission 19); this file picks exactly one as the cause - see
+build_recon_mismatch()'s docstring for which one and why.
 
-Rebuild modes match reconcile_account.py: an explicit period list
-rewrites only those periods, no args rewrites every period currently in
-fact_gl_line, never a bare DELETE/CREATE OR REPLACE on the full table.
+Rebuild modes match reconcile_account.py: explicit periods rewrite only
+those, no args rewrites everything currently in fact_gl_line.
 
 Run: python src/reconcile_mismatch.py [<company_code> <fiscal_year> <fiscal_period> ...]
-  no args: rebuild for every period currently in fact_gl_line
-  with args: rebuild only the given (company, year, period) triples
 """
 
 import sys
