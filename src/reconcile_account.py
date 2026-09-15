@@ -2,14 +2,12 @@
 ticket 10.
 
 Builds recon_period_summary: one row per (gl_account, fiscal_year,
-fiscal_period), comparing stg_gl to fact_gl_line. Separate columns for
-the debit/credit gap (clean) and the local_amount gap (known-broken,
-see issue #13) - a single net column would hide that distortion.
+fiscal_period), comparing stg_gl to fact_gl_line. Separate dc_gap /
+local_amount_gap columns, not netted into one - why: ADR-0002.
 
-Rebuild modes: build_recon_period_summary(con, periods=[...]) rewrites
-only those periods; build_recon_period_summary(con) with no periods
-rewrites every period currently in fact_gl_line. Neither ever issues a
-bare DELETE/CREATE OR REPLACE against the full table (see mission 10).
+Rebuild modes: explicit periods rewrite only those; no args rewrites
+everything currently in fact_gl_line. Never a bare DELETE/CREATE OR
+REPLACE on the full table (mission 10).
 
 Run: python src/reconcile_account.py [<company_code> <fiscal_year> <fiscal_period> ...]
   no args: rebuild for every period currently in fact_gl_line
