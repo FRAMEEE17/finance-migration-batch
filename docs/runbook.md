@@ -65,7 +65,27 @@ one states what it measured, not just pass/fail.
 ## Running it through Airflow
 
 `dags/gl_period_close.py` runs the same steps above as one DAG (mission
-20), plus a final gate task (mission 21):
+20), plus a final gate task (mission 21).
+
+**One-time setup**, before the first launch: the failure alert
+(`FAILURE_NOTIFIER` in the DAG file) needs an `smtp_default` connection
+to exist in Airflow's own metadata DB - it isn't in git, isn't in this
+repo at all, and a fresh `airflow standalone` won't have it. Without
+this, a task failure fails silently at the alert step (`SMTP connection
+is not found`) instead of sending anything. For local testing against a
+debug SMTP server (`python3 -m aiosmtpd -n -l localhost:1025`), not a
+real mailbox:
+
+```bash
+airflow connections add smtp_default \
+  --conn-type smtp \
+  --conn-host localhost \
+  --conn-port 1025 \
+  --conn-extra '{"disable_tls": true, "disable_ssl": true, "from_email": "gl-period-close@finance-migration-batch.local"}'
+```
+
+For a real destination, swap `--conn-host`/`--conn-port` for a real SMTP
+relay and drop the `disable_tls`/`disable_ssl` extras.
 
 ```bash
 airflow standalone
