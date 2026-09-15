@@ -97,6 +97,26 @@ how this project applies it, and where we differ.
   GL lines on `gl_account` to produce `dim_account` and the mapped
   `fact_gl_line`.
 
+### Slowly Changing Dimension, deliberately not used (ch. Data Modeling)
+
+- **Book:** a dimension's attributes change over time; a fact should keep
+  reflecting the dimension value that was true when the fact happened, not
+  silently pick up a later change. SCD Type 2 solves this with an
+  effective-dated dimension table and a live join.
+- **Us:** `dim_account` is rebuilt from `map_account.csv` on every load
+  (Type 1, overwrite), but that isn't the mechanism protecting a closed
+  period. `src/load_fact.py`'s period loader joins `map_account` once, at
+  load time, and writes `target_account` and `map_status` directly onto
+  each `fact_gl_line` row - a denormalized snapshot, not a live reference.
+  If `map_account.csv` changes later, an already-loaded period's rows keep
+  the mapping they were closed under; nothing re-derives them until that
+  period is reloaded on purpose.
+- **Delta:** same problem SCD Type 2 exists to solve (a fact must not
+  drift when its dimension changes), solved by denormalizing the mapping
+  into the fact row at load time instead of maintaining an effective-dated
+  dimension table and a live join. No SCD machinery, because there's no
+  live join left for a dimension change to leak through.
+
 ## Storage
 
 ### Horizontal Partitioner (ch. Data Storage)
