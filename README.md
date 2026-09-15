@@ -1,23 +1,26 @@
 # finance-migration-batch
 
-An ERP/SAP-style GL migration and reconciliation pipeline. It moves a raw
-general ledger extract into a modeled warehouse, and for every period,
-answers one question precisely: does the raw data match the modeled data,
-and if not, why not, for every single line.
+A finance team closing a period asks one question that a lot of pipelines
+quietly dodge: does the number in the warehouse match the number in the
+raw extract, and if it doesn't, why not, for every line. This project is
+built to never dodge that question.
 
-Not a dashboard. Not a demo of a framework. The whole project exists to
-make one claim defensible: a finance period can close only when every
-difference between what came in and what got published has a named cause.
+Raw SAP-style GL extract goes in, a modeled warehouse comes out, and every
+period gets reconciled back against the source before anyone's allowed to
+call it closed. It's not a dashboard and it's not a framework tour - I
+don't care how the numbers look, I care whether they're right, and
+whether I can say why when they're not.
 
 ## The problem, in one paragraph
 
-A company's GL export arrives as a flat file: 649,000 rows, 49 columns,
-one company, thirteen months. Someone has to turn that into a warehouse
-finance can actually close a period against - mapped to a real chart of
-accounts, checked for the kind of errors a spreadsheet won't catch, and
-reconciled line by line against the raw extract. If a number moves
-between "raw" and "published," this project's job is to say exactly
-which line moved it and why, not to shrug and call it `unknown`.
+A GL export lands as a flat file: 649,000 rows, 49 columns, one company,
+thirteen months. Somebody has to turn that into something finance can
+close a period against. Real chart-of-accounts mapping, checks for the
+kind of thing a spreadsheet won't catch, and a line-by-line reconciliation
+back to the raw extract. If a number moves between raw and published, this
+project's job is to say exactly which line moved it and why. "Unknown" is
+not an acceptable answer here, and the pipeline is built to make that hard
+to fall back on.
 
 ## Architecture
 
@@ -63,58 +66,66 @@ flowchart LR
     signoff -. gates .-> ready
 ```
 
-Every arrow is a script in `src/`, and every one of them answers exactly
-one question before handing off to the next. Full breakdown, including
-which design pattern each stage follows (cited against Bartosz
-Konieczny's *Data Engineering Design Patterns*, not just named), is in
-[`docs/architecture.md`](docs/architecture.md).
+Every arrow up there is a script in `src/`, and each one answers exactly
+one question before it hands off to the next stage. I picked every
+pattern name against Bartosz Konieczny's *Data Engineering Design
+Patterns* on purpose, not as decoration after the fact. The full
+breakdown of which pattern maps to which stage lives in
+[`docs/architecture.md`](docs/architecture.md), if you want the citations.
 
-**Orchestration:** as of `dags/gl_period_close.py`, the same seven scripts
-run as an Airflow DAG instead of a manually-ordered sequence. Concurrency
-is capped at one run at a time (`max_active_runs=1`) because the
-warehouse is a single DuckDB file with one writer, not several - cited to
-the *Single Runner* pattern from the same book. Every task carries one
-retry, since every one of them is provably idempotent (replace-whole-
-period, never append).
+As of `dags/gl_period_close.py`, those same seven scripts run as an
+Airflow DAG instead of a hand-ordered shell sequence. Only one run at a
+time (`max_active_runs=1`), because the warehouse is a single DuckDB
+file with a single writer and two concurrent runs would just race each
+other. That's the Single Runner pattern from the same book. Every task
+gets one retry, which is safe here specifically because every task
+replaces a whole period rather than appending to it - rerun it and you
+get the same numbers back, not double the numbers.
 
 <!-- demo: Airflow's graph view for gl_period_close, mid-run or after -->
 <!-- ![Airflow DAG graph](docs/images/airflow-dag-graph.png) -->
 
 ## Data modeling
 
-The grain is `company_code + document_id + line_number + fiscal_year +
-fiscal_period` - one row per GL line. `stg_gl` is that grain, untouched.
-`fact_gl_line` is the same grain after three things happen to it:
+Grain is `company_code + document_id + line_number + fiscal_year +
+fiscal_period`, one row per GL line. `stg_gl` sits at that grain,
+untouched, exactly as it arrived. `fact_gl_line` is the same grain after
+three things happen to it.
 
-- **Mapping.** `map_account.csv` rolls 505 raw source account codes up
-  into roughly 27 target classes. A human approves this file; nothing
-  here guesses a target account code from data alone. A few accounts
-  (clearing, catch-all) keep their own code instead of rolling into a
-  class - see [`docs/definitions.md`](docs/definitions.md) for exactly
-  which and why.
-- **Quality gate.** Eight checks, five blocking and three non-blocking,
-  run before a line is allowed to publish. A blocking finding excludes
-  the line; a non-blocking one loads the line anyway and logs the
-  problem in `dq_violations` instead of hiding it.
-- **Period replace, never append.** Loading a period deletes and
-  reinserts that whole period inside one transaction. Re-running with an
-  unchanged mapping reproduces the exact same row counts and totals -
-  proven as a regression check, not assumed.
+First, mapping. `map_account.csv` rolls roughly 505 raw source account
+codes up into about 27 target classes, and a human signs off on that
+file before it's used. Nothing in this pipeline guesses a target account
+code from the data - a handful of accounts (clearing, catch-all) keep
+their own code instead of rolling up, and `docs/definitions.md` says
+exactly which ones and why.
 
-Reconciliation compares `stg_gl` against `fact_gl_line`, twice: once
-coarse (`recon_period_summary`, totals per account per period) and once
-line-by-line (`recon_mismatch`, one bucket and one cause per gap, never
-two). Every cause comes from a fixed list in `docs/definitions.md` - none
-gets invented in a query.
+Second, the quality gate. Eight checks, five blocking and three not.
+A blocking finding keeps the line out of `fact_gl_line` entirely; a
+non-blocking one still lets the line through but writes the problem to
+`dq_violations` so it's visible instead of quietly swallowed.
 
-`fact_gl_line_ready` is a narrower view on top of all this, filtered to
-periods where `period_signoff.recon_status = 'accepted'`. It exists so a
-downstream reader can't accidentally sum a period that was never actually
-checked.
+Third, period replace. Loading a period deletes and reinserts the whole
+thing inside one transaction, never an append. I didn't just assume that
+was safe to retry - I reran it with an unchanged mapping and checked the
+row counts and totals came back identical, and that check now runs as a
+regression test.
+
+Reconciliation runs `stg_gl` against `fact_gl_line` twice: once coarse
+(`recon_period_summary`, totals per account per period) and once at the
+line level (`recon_mismatch`, exactly one bucket and one cause per gap -
+never two, because a mismatch with two causes is really two mismatches
+that got lumped together). Every cause comes from a fixed list in
+`docs/definitions.md`. Nothing gets invented on the fly inside a query.
+
+`fact_gl_line_ready` sits on top of all of it, filtered down to periods
+where `period_signoff.recon_status = 'accepted'`. The point of that view
+is entirely defensive: it stops a downstream reader from accidentally
+summing a period that was never actually checked.
 
 ## Running it
 
-Two ways to run the same pipeline.
+Two ways to run the same pipeline. They call the exact same functions in
+`src/`, so pick whichever fits what you're trying to see.
 
 **By hand**, following [`docs/runbook.md`](docs/runbook.md):
 
@@ -130,29 +141,27 @@ python3 src/build_analyst_view.py
 python3 src/checks.py
 ```
 
-**Through Airflow.** Start the local instance (webserver, scheduler,
-triggerer, and dag-processor bundled into one dev command):
+**Through Airflow.** Start the local instance first - this bundles the
+webserver, scheduler, triggerer, and dag-processor into one command,
+which is convenient for a laptop and exactly the reason it's not what a
+real deployment runs:
 
 ```bash
 export PATH="$(pwd)/.venv/bin:$PATH"  # or wherever the Airflow venv lives
 airflow standalone
 ```
 
-`standalone` is Airflow's own dev-only entry point - not what a real
-deployment runs, but the fastest way to see the DAG execute. It prints an
-admin login on first launch and serves the UI at `localhost:8080`.
-`dags/gl_period_close.py` needs no separate registration step; Airflow's
-dag-processor scans the `dags/` folder on its own and picks it up.
+It prints an admin login on first launch and serves the UI at
+`localhost:8080`. You don't register `gl_period_close` anywhere - drop
+the DAG file in `dags/` and Airflow's own dag-processor picks it up on
+its next scan.
 
-Trigger a run from the UI, or from the command line:
+From there, trigger a run from the UI, or from the command line:
 
 ```bash
 airflow dags trigger gl_period_close \
   --conf '{"company_code":1000,"fiscal_year":2024,"fiscal_period":3}'
 ```
-
-Both paths call the exact same functions in `src/`. The DAG doesn't
-re-implement anything; it sequences what already existed.
 
 ## Looking at the data
 
@@ -160,24 +169,26 @@ re-implement anything; it sequences what already existed.
 duckdb -ui warehouse.duckdb
 ```
 
-opens DuckDB's own web UI against the real warehouse - every table
-browsable, column diagnostics on click, a SQL notebook for anything
-deeper. No separate database client needed, and no version mismatch risk
-either, since it's the same DuckDB build that wrote the file.
+That opens DuckDB's own web UI against the real warehouse file. Every
+table's browsable, column diagnostics are one click away, and there's a
+SQL notebook for anything deeper. No separate database client, and no
+version-mismatch risk either, since it's literally the same DuckDB build
+that wrote the file in the first place - I burned an afternoon on a
+third-party driver that wasn't, so this is the one I'd actually recommend.
 
 <!-- demo: DuckDB UI with the warehouse's tables open -->
 <!-- ![DuckDB UI](docs/images/duckdb-ui.png) -->
 
 ## What "closed" actually means here
 
-A period isn't closed because a script exits 0. It's closed when
+A period isn't closed because a script exited zero. It's closed once
 [`reports/period_2024-01.md`](reports/period_2024-01.md) exists (the
-working paper a human reads) and `period_signoff` carries that period's
-machine-readable state - deliberately two different things, not one file
-wearing two hats. The report can never be mistaken for an approval; it
-says so in its own text. See
-[ADR-0008](docs/adr/0008-markdown-report-is-working-paper-not-signoff.md)
-for the full reasoning.
+working paper a human actually reads) and `period_signoff` carries that
+period's machine-readable state. Those are deliberately two different
+things - one file trying to be both a report and an approval record
+tends to end up being neither convincingly. The report says so plainly
+in its own text: it's evidence, not a signature. Full reasoning is in
+[ADR-0008](docs/adr/0008-markdown-report-is-working-paper-not-signoff.md).
 
 <!-- demo: a signed period report, or the controller pack -->
 <!-- ![Period report](docs/images/period-report-sample.png) -->
@@ -185,29 +196,34 @@ for the full reasoning.
 ## Status
 
 17 of 20 tracked tickets closed. `src/checks.py` runs 72 checks against
-the real dataset, every one pinned to a real number, not a fixture -
-currently 72/72. Real scope today: company `1000`, fiscal year 2024,
-periods 01 through 03.
+the real dataset, every single one pinned to a real number rather than a
+fixture, and right now it's 72 for 72. Real scope today is company
+`1000`, fiscal year 2024, periods 01 through 03 - I haven't tried to
+pretend this covers more than it does.
 
-Open, on purpose:
+Open on purpose, not forgotten:
 
 - [#1](../../issues/1) - a rendered architecture diagram beyond the
   mermaid one above
-- [#11](../../issues/11) - FY2025 P02 stray rows, out of scope until FY2025 opens
-- [#13](../../issues/13) - `local_amount` on high-line-count documents, under investigation
+- [#11](../../issues/11) - FY2025 P02 has some stray rows, out of scope
+  until FY2025 actually opens
+- [#13](../../issues/13) - `local_amount` behavior on high-line-count
+  documents, still under investigation
 
-Deliberately not built yet, and named as a decision rather than left
-silent: a cloud warehouse swap (DuckDB to Databricks/Synapse - same SQL,
-different engine), a declarative DQ framework replacing the hand-written
-checks, and a general-purpose period gate for the Airflow DAG's own last
-task. None of these are blocked; none are needed yet at this project's
-real scale.
+And a few things I'm deliberately not building yet, named here instead of
+left silent: swapping DuckDB for a cloud warehouse like Databricks or
+Synapse (same SQL, different engine underneath), a declarative
+data-quality framework instead of the hand-written checks, and a
+general-purpose period gate for the Airflow DAG's last task. None of
+these are blocked on anything. They're just not needed yet at the scale
+this project actually runs at.
 
 ## Tech
 
-DuckDB · Python · Apache Airflow · pandas-free by design (SQL is the
-reconcile engine; see [`docs/design-patterns.md`](docs/design-patterns.md)
-for why that's a deliberate constraint, not an oversight)
+DuckDB, Python, Apache Airflow. Pandas-free by design - SQL does the
+reconciling, not a dataframe. [`docs/design-patterns.md`](docs/design-patterns.md)
+has the reasoning if you're wondering whether that was an oversight. It
+wasn't.
 
 ## Repo layout
 
@@ -229,7 +245,8 @@ for why that's a deliberate constraint, not an oversight)
 └── warehouse.duckdb      gitignored - rebuilt by the loaders, not committed
 ```
 
-Work is tracked as GitHub issues, dependency order enforced with native
-blocked-by edges. Every ticket has a mission spec in `docs/missions/`
+Work here is tracked as GitHub issues, with blocked-by edges enforcing
+dependency order. Every ticket gets a mission spec in `docs/missions/`
 written before any code, real exploration against real data before a
-rule gets locked, and a human sign-off before the result gets used.
+rule gets locked in, and a human sign-off before the result gets used
+for anything.
