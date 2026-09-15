@@ -192,4 +192,25 @@ ships:
 
 ## Retro
 
-Filled after the mission closes.
+Closed via #21-#25. One rule this adds: the 20% unknown-mismatch
+threshold in `docs/definitions.md` now says explicitly that the
+comparison runs on the raw, unrounded percentage - rounding is
+display-only. That line didn't exist before this mission; the code had
+silently been rounding before comparing, which a scrutinize pass
+during #21's grilling caught as a real boundary bug (a genuine 19.96%
+period would have been rejected).
+
+Two things worth remembering for the next mission that touches
+`dags/gl_period_close.py`:
+
+- Any per-run override a task needs (warehouse path, a demo-only flag)
+  has to go through the DAG's own `params`/`--conf`, not an env var -
+  the live scheduler's process env is fixed at `airflow standalone`
+  launch time, and a task's own module imports (like
+  `config.WAREHOUSE_DB`) bind to that env at DAG-parse time inside
+  each task's subprocess, too early for anything set later to reach.
+- A demo fault gated only on `--conf` can never be "removed" by
+  Airflow's own Clear, because Clear preserves the DagRun's original
+  conf. Anything meant to be recoverable via clear-and-retry needs an
+  external condition (a file, a table row) that clearing doesn't
+  reset - found this the hard way on #25's first attempt.
