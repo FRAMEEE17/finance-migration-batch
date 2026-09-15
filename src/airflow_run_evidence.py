@@ -1,29 +1,9 @@
 """Per-attempt run evidence for the Airflow DAG. Mission 21, issue #23.
+What this records and why: docs/runbook.md's Airflow section.
 
-Records, for every task attempt: the DAG run id, task id, attempt
-number, requested period, outcome, and a SHA-256 hash of the source
-parquet and map_account.csv as they stood at that attempt - every task
-gets this record, whether or not it reads those files itself, since the
-point is a full per-run trail, not just a per-file one.
-
-Defensive, not just informational, for the two tasks that actually
-consume those files: a recovery is a clear-and-rerun inside the same
-DAG run_id. Before load_stg or load_fact's real body runs,
-run_with_evidence(..., check_inputs=True) compares the current
-source/mapping hashes against that same run's earlier attempt of that
-same task, and rejects the attempt if either changed - Airflow's retry
-model assumes a task is idempotent against unchanged inputs (mission
-20's own retries=1 justification), and this is what makes that
-assumption checkable instead of assumed. Every other task passes
-check_inputs=False (source/mapping identity has nothing to do with
-whether reconcile_mismatch's retry is safe) but still gets recorded.
-
-Plain JSON files under reports/airflow_runs/, one per attempt. Never
-touches warehouse.duckdb - evidence survives independently of the
-database, and reading it back doesn't require a connection.
-
-Run: nothing to run directly - a library used by dags/gl_period_close.py
-and by src/checks.py's regression tests.
+Plain JSON files under reports/airflow_runs/<run_id>/<task_id>__attempt<N>.json,
+never touching warehouse.duckdb. A library, not a script - used by
+dags/gl_period_close.py and src/checks.py's regression tests.
 """
 
 import hashlib
