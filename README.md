@@ -1,5 +1,7 @@
 # finance-migration-batch
 
+![Pipeline](docs/images/pipe_diagram.png)
+
 I built this batch pipeline to migrate a SAP-style general ledger extract
 into a warehouse and explain the differences between source and output.
 It uses Python and DuckDB, with SQL for reconciliation and Airflow for
