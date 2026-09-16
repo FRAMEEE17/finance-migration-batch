@@ -131,8 +131,8 @@ summing a period that was never actually checked.
 
 ## Running it
 
-Two ways to run the same pipeline. They call the exact same functions in
-`src/`, so pick whichever fits what you're trying to see.
+A few ways to run the same pipeline. They call the exact same functions
+in `src/`, so pick whichever fits what you're trying to see.
 
 **By hand**, following [`docs/runbook.md`](docs/runbook.md):
 
@@ -147,6 +147,35 @@ python3 src/build_period_report.py 1000 2024 1
 python3 src/build_analyst_view.py
 python3 src/checks.py
 ```
+
+**In a container**, without touching your local Python at all:
+
+```bash
+docker build -t finance-migration-batch .
+docker run --rm -it \
+  -v "$(pwd)/dataset:/app/dataset" \
+  -v "$(pwd)/reports:/app/reports" \
+  -v "$(pwd)/warehouse_container.duckdb:/app/data/warehouse.duckdb" \
+  -e GL_WAREHOUSE_PATH=/app/data/warehouse.duckdb \
+  finance-migration-batch
+```
+
+Drops into a shell with the pipeline installed - run the same commands
+from `docs/runbook.md` inside it. `dataset/`, `warehouse.duckdb`, and
+`reports/` stay outside the image (real data, gitignored on the host for
+the same reason) and get mounted in instead - see the `Dockerfile`'s own
+comments for why. Point `GL_WAREHOUSE_PATH` at a directory you actually
+want to write to; a bind-mount target that doesn't exist yet becomes a
+directory, not a file, which DuckDB will refuse to open.
+
+One honest limitation, found by actually testing this against a truly
+empty warehouse rather than assuming: `checks.py` gives 81/81 against the
+real, years-old `warehouse.duckdb`, but only 79/81 starting from nothing
+in a fresh container. The 2 that don't pass need `dim_account`, which
+only `src/build_mapping.py` (mission 01, a one-time bootstrap) ever
+builds - and that script also unconditionally rewrites `map_account.csv`,
+so re-running it isn't safe once a human has approved that file. A truly
+from-empty bootstrap was never exercised before this, on any machine.
 
 **Through Airflow.** Start the local instance first - this bundles the
 webserver, scheduler, triggerer, and dag-processor into one command,
