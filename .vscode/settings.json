@@ -6,10 +6,23 @@
         "Deduplicator",
         "fanout",
         "ILIKE",
+        "Konieczny",
         "Konieczny's",
+        "lettrage",
         "mapf",
+        "oncall",
+        "parameterizes",
         "Partitioner",
         "rollup",
         "vynfi"
+    ],
+    "sqltools.useNodeRuntime": true,
+    "sqltools.connections": [
+        {
+            "previewLimit": 50,
+            "driver": "DuckDB",
+            "name": "warehouse",
+            "database": "${workspaceFolder:finance-migration-batch}/warehouse.duckdb"
+        }
     ]
 }
