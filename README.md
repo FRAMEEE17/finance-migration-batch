@@ -63,21 +63,21 @@ The pipeline applies a human-approved `map_account.csv` to build
 27 classes, with clearing and catch-all codes retaining their own identity.
 `dim_account` is built separately by the mapping bootstrap.
 
-The quality gate has eight checks: five blocking and three non-blocking.
+The quality gate has 8 checks: 5 blocking and 3 non-blocking.
 Blocking findings exclude affected lines from the fact table; all findings
 go to `dq_violations`. Duplicate grains are blocked because the source has
 no version field to identify which copy to keep.
 
-Each fact load replaces the requested periods in one transaction. Regression
+Each fact load replaces the requested periods in 1 transaction. Regression
 checks verify that rerunning with unchanged mapping preserves counts and
 totals. `recon_period_summary` compares account totals; `recon_mismatch`
 compares source lines with the close-eligible fact rows and assigns each
-gap one bucket and one cause from [the definitions](docs/definitions.md).
+gap 1 bucket and 1 cause from [the definitions](docs/definitions.md).
 
-The Airflow DAG runs seven pipeline stages followed by `period_close_gate`.
-The final task checks the signoff row, three report files, account
+The Airflow DAG runs 7 pipeline stages followed by `period_close_gate`.
+The final task checks the signoff row, 3 report files, account
 reconciliation, and mismatch coverage. `max_active_runs=1` serializes runs
-against the single DuckDB file. Tasks have one retry and require a shared
+against the single DuckDB file. Tasks have 1 retry and require a shared
 local filesystem. Each attempt records input hashes and results; retries
 of source-reading tasks reject changed inputs.
 
@@ -131,7 +131,7 @@ python3 src/checks.py
 ```
 
 The existing warehouse passes 81/81 checks. A fresh container run was
-79/81: two checks require `dim_account`, which only
+79/81: 2 checks require `dim_account`, which only
 `src/build_mapping.py` creates. That bootstrap also overwrites
 `map_account.csv`, so do not rerun it over an approved mapping. The normal
 sequence above does not resolve this bootstrap gap.
@@ -215,7 +215,6 @@ tables and reports.
 
 Open issues:
 
-- [#1](../../issues/1): rendered architecture diagram.
 - [#11](../../issues/11): FY2025 P02 rows, pending expansion of close scope.
 - [#13](../../issues/13): `local_amount` behavior on high-line-count documents.
 
