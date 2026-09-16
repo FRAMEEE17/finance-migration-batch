@@ -1,0 +1,157 @@
+Table stg_gl {
+  document_id varchar
+  company_code bigint
+  fiscal_year bigint
+  fiscal_period bigint
+  posting_date varchar
+  document_date varchar
+  document_type varchar
+  currency varchar
+  exchange_rate double
+  header_text varchar
+  created_by varchar
+  source varchar
+  business_process varchar
+  ledger varchar
+  is_fraud boolean
+  is_anomaly boolean
+  line_number bigint
+  gl_account bigint
+  debit_amount double
+  credit_amount double
+  local_amount double
+  is_manual boolean
+  is_post_close boolean
+  account_description varchar
+  financial_statement_category varchar
+  transaction_id varchar
+  account_class varchar
+  account_class_name varchar
+  account_sub_class varchar
+  account_sub_class_name varchar
+  fraud_type varchar
+  anomaly_type varchar
+
+  Note: 'raw, as-loaded. grain: company_code+document_id+line_number+fiscal_year+fiscal_period'
+}
+
+Table map_account {
+  source_account varchar [pk]
+  target_account varchar
+  status varchar
+
+  Note: 'human-approved, docs/definitions.md'
+}
+
+Table dim_account {
+  gl_account bigint [pk]
+  account_class varchar
+  account_sub_class varchar
+  fs_category_proposed varchar
+  fs_category_flag boolean
+}
+
+Table fact_gl_line {
+  document_id varchar
+  company_code bigint
+  fiscal_year bigint
+  fiscal_period bigint
+  line_number bigint
+  gl_account bigint
+  debit_amount double
+  credit_amount double
+  local_amount double
+  target_account varchar
+  map_status varchar
+  is_opening_balance boolean
+  is_closing_entry boolean
+  is_post_close boolean
+  loaded_at timestamp
+
+  Note: 'mapped, deduped, DQ-checked, period-scoped. same grain as stg_gl'
+}
+
+Table dq_violations {
+  check_name varchar
+  blocking boolean
+  company_code bigint
+  document_id varchar
+  line_number bigint
+  fiscal_year bigint
+  fiscal_period bigint
+  detail varchar
+  checked_at timestamp
+}
+
+Table recon_period_summary {
+  company_code bigint
+  gl_account bigint
+  fiscal_year bigint
+  fiscal_period bigint
+  stg_debit_total double
+  stg_credit_total double
+  dc_gap double
+  stg_local_total double
+  fact_local_total double
+  local_amount_gap double
+  imbalanced_doc_count bigint
+  imbalanced_local_amount double
+  excluded_unbalanced_doc_count bigint
+
+  Note: 'one row per gl_account+fiscal_year+fiscal_period'
+}
+
+Table recon_mismatch {
+  company_code bigint
+  document_id varchar
+  line_number bigint
+  fiscal_year bigint
+  fiscal_period bigint
+  bucket varchar
+  cause varchar
+  gap double
+  pair_id varchar
+  is_swap_valid boolean
+}
+
+Table period_signoff {
+  company_code bigint
+  fiscal_year bigint
+  fiscal_period bigint
+  recon_status varchar
+  local_amount_status varchar
+  accounts_compared bigint
+  accounts_matched bigint
+  dc_gap double
+  unknown_mismatch_pct double
+  imbalanced_doc_count bigint
+  imbalanced_total double
+  report_path varchar
+  controller_pack_path varchar
+  exceptions_path varchar
+  generated_at timestamp
+
+  Note: 'machine-readable close state, ADR-0008'
+}
+
+Table fact_gl_line_ready {
+  document_id varchar
+  company_code bigint
+  fiscal_year bigint
+  fiscal_period bigint
+  gl_account bigint
+  local_amount double
+  recon_status varchar
+  local_amount_status varchar
+  is_period_movement boolean
+
+  Note: 'view: fact_gl_line joined to accepted period_signoff rows'
+}
+
+Ref: stg_gl.gl_account > map_account.source_account
+Ref: fact_gl_line.gl_account > dim_account.gl_account
+Ref: fact_gl_line.company_code > recon_period_summary.company_code
+Ref: fact_gl_line.company_code > recon_mismatch.company_code
+Ref: fact_gl_line.company_code > period_signoff.company_code
+Ref: dq_violations.document_id > fact_gl_line.document_id
+Ref: fact_gl_line.document_id - fact_gl_line_ready.document_id

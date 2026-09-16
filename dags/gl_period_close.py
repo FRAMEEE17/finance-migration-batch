@@ -1,28 +1,16 @@
 """Airflow DAG for the existing period-close pipeline. Mission 20.
 
-Wraps the same 7 steps docs/runbook.md already documents, calling each
-script's existing core function directly - not through the CLI. Every
-task's docstring below says exactly which function it calls and why,
-matching mission 20's own per-script table (checked against the real
-source, not assumed). No SQL or business logic lives in this file; it
-only sequences and parameterizes what src/checks.py already verifies
-against real data.
+Wraps the 7 steps docs/runbook.md documents, calling each script's core
+function directly, not the CLI. No SQL or business logic here; it only
+sequences what src/checks.py already verifies.
 
-quality_gate.py is not a task here - it already runs inside load_fact's
-load_period(). checks.py still isn't a task - it pins exact numbers to
-periods 1-3 and can't be a general period gate (mission 20's
-Non-goals). period_close_gate.py (mission 21) is that general gate: the
-DAG's last task, reading what every task before it already produced and
-deciding, for whatever period this run asked for, whether it's actually
-closeable.
+quality_gate.py runs inside load_fact's load_period(), not as its own
+task. checks.py pins exact numbers to periods 1-3, so it can't be a
+general gate either - period_close_gate.py (mission 21) is that gate,
+the DAG's last task.
 
-Lives in the repo, not in ~/airflow/dags/ - Airflow's dags_folder
-(airflow.cfg) points here directly, so this file is the one thing
-Airflow parses and the one thing tracked in git. No copy to keep in
-sync.
-
-Trigger manually, one period at a time - see the Single Runner note
-below for why:
+Lives in the repo, not ~/airflow/dags/: airflow.cfg's dags_folder points
+here directly.
 
   airflow dags trigger gl_period_close \
     --conf '{"company_code":1000,"fiscal_year":2024,"fiscal_period":3}'
@@ -41,21 +29,9 @@ from airflow.sdk import DAG, Param, task, get_current_context # type: ignore
 
 from config import WAREHOUSE_DB  # type: ignore
 
-# Mission 21, issue #24: fires once a task's retries are exhausted -
-# Airflow only calls on_failure_callback when a task instance actually
-# reaches the `failed` state, which a retry that still has attempts left
-# does not (it goes to `up_for_retry` instead). No extra "did retries run
-# out" logic needed; this is what that state transition already means.
-# smtp_default connection (issue #21's decision) points at a local debug
-# SMTP server for testing, not a real mailbox - see docs/runbook.md.
-#
-# html_content deliberately does NOT reference {{ exception }} - that
-# variable does not exist in this Task SDK version's notifier template
-# context (confirmed via a real jinja2.exceptions.UndefinedError while
-# root-causing why no alert ever delivered: the SMTP transaction got as
-# far as the DATA command, then died rendering the body). The full
-# exception text is already in the evidence JSON's "detail" field
-# (src/airflow_run_evidence.py), which this email links to instead.
+# Fires when retries are exhausted (mission 21, issue #24) - see
+# docs/runbook.md's Airflow section for why html_content skips
+# {{ exception }} and where the full detail actually lives.
 FAILURE_NOTIFIER = SmtpNotifier(
     from_email="gl-period-close@finance-migration-batch.local",
     to="oncall@finance-migration-batch.local",
@@ -81,34 +57,14 @@ DEMO_OFF = "none"  # sentinel default for both demo params, see below
 
 
 def _warehouse_path(ctx) -> Path:
-    """Mission 21 demo hook (issue #25): demo_warehouse_path lets a
-    single trigger's --conf point every task at a throwaway copy of the
-    warehouse instead of the real one, with zero risk to real data -
-    the DEMO_OFF sentinel (the default) falls back to the real
-    WAREHOUSE_DB, so a normal trigger is unaffected. A per-run param,
-    not an env var: the live scheduler's own process env can't be
-    changed per trigger, but DagRun.conf can, and Clear preserves the
-    original conf on retry - exactly what a real clear-and-recover
-    needs.
+    """Mission 21 demo hook (issue #25): demo_warehouse_path lets one
+    trigger's --conf point every task at a throwaway warehouse copy.
+    DEMO_OFF is the default and falls back to the real WAREHOUSE_DB. A
+    per-run param, not an env var, so Clear can preserve it on retry.
 
-    Default is the literal string "none", not "" - a user reported the
-    trigger UI marking this field required with an empty-string
-    default, which the browser wasn't available to verify directly in
-    this session. Best available evidence: Airflow's own
-    params_trigger_ui example DAG only uses non-empty defaults (True,
-    a populated list) for its optional-looking params, never an empty
-    string. "none" matches that pattern - visibly filled in,
-    self-explanatory, can never collide with a real path - but treat
-    this as the leading hypothesis, not a confirmed root cause, until
-    someone checks the actual rendered form.
-
-    Requires the path to already exist when set to anything else.
-    duckdb.connect() silently creates an empty file for any path that
-    doesn't exist yet - found this the hard way after the trigger UI's
-    required-looking field could plausibly pressure someone into
-    typing a placeholder just to get past it, pointing the real close
-    at a brand-new empty warehouse with no error at all. A typo or a
-    placeholder now fails loud instead of quietly reconciling nothing."""
+    The path must already exist. duckdb.connect() otherwise creates an
+    empty file silently, and the run would reconcile nothing against no
+    data - fail loud instead."""
     p = ctx["params"].get("demo_warehouse_path")
     if not p or p == DEMO_OFF:
         return WAREHOUSE_DB
@@ -125,23 +81,14 @@ def _warehouse_path(ctx) -> Path:
     return path
 
 
-# debug-mantra audit (mission 21): warehouse.duckdb and reports/airflow_runs/
-# (#23's evidence) are plain local filesystem paths, never anything
-# executor-aware. Every real test this session ran under LocalExecutor
-# (airflow.cfg: executor = LocalExecutor), where every task attempt is
-# guaranteed to land on the same machine and see the same disk. Under
-# CeleryExecutor or KubernetesExecutor, two attempts of the same task can
-# land on different workers/pods with no shared disk - the warehouse
-# connection would silently point at a different or missing file, and
-# check_inputs_unchanged() would silently see "no prior attempt" every
-# single time, defeating the changed-input-rejection check with no error
-# at all. Worse than a crash: a safety check that looks like it's working
-# and isn't. Fail loud here instead, before any task's real work starts.
+# warehouse.duckdb and reports/airflow_runs/ are plain local paths, not
+# executor-aware - see docs/runbook.md for why a distributed executor
+# needs shared storage or this check loosened deliberately.
 _SHARED_FILESYSTEM_EXECUTORS = {"LocalExecutor", "SequentialExecutor", "DebugExecutor"}
 
 
 def _assert_shared_filesystem_executor() -> None:
-    from airflow.configuration import conf
+    from airflow.configuration import conf # type: ignore
     executor = conf.get("core", "executor")
     if executor not in _SHARED_FILESYSTEM_EXECUTORS:
         raise RuntimeError(
@@ -157,20 +104,11 @@ def _assert_shared_filesystem_executor() -> None:
 
 
 def _with_evidence(task_id, fn, check_inputs=False):
-    """Mission 21 (issue #23): wraps a task's real body, records the
-    outcome (success/failed/rejected) as evidence after. check_inputs
-    additionally checks this attempt's source/mapping hashes against
-    the same DAG run's earlier attempt of this same task before running
-    anything, rejecting a clear+retry whose inputs changed underneath
-    it - only load_stg and load_fact pass check_inputs=True, since
-    they're the only two tasks that actually read those files
-    (scrutinize finding: checking it on every task let an unrelated
-    task's retry get rejected over a file it never reads). See
-    src/airflow_run_evidence.py.
-
-    _assert_shared_filesystem_executor() runs first, for the same reason
-    check_inputs_unchanged() matters at all: this whole mechanism is
-    worthless if two attempts can't actually see each other's evidence."""
+    """Wraps a task's body and records the outcome as evidence (mission
+    21, issue #23 - src/airflow_run_evidence.py). check_inputs=True only
+    for load_stg/load_fact, the two tasks that actually read the source
+    files it hashes; rejects a clear+retry whose inputs changed
+    underneath it."""
     _assert_shared_filesystem_executor()
     import airflow_run_evidence
     ctx = get_current_context()
@@ -187,29 +125,20 @@ with DAG(
     description="Close one fiscal period through the existing pipeline scripts, in order.",
     schedule=None,
     catchup=False,
-    # Single Runner pattern (Konieczny, Data Engineering Design Patterns,
-    # ch. Orchestration): warehouse.duckdb is one file, single-writer.
-    # reconcile_account and reconcile_mismatch already rebuild every
-    # loaded period on every call, regardless of which period triggered
-    # the run - two DAG Runs at once would race on the same file. This
-    # is a correctness requirement, not a throughput setting.
+    # Single Runner pattern (Konieczny, ch. Orchestration): warehouse.duckdb
+    # is one file, single-writer; two DAG Runs would race on it.
     max_active_runs=1,
-    # Safe because every task below is: load_stg/load_fact are proven by
-    # verify_rollback_safety, the three reconcile_* tasks and
-    # write_period_signoff all DELETE ... WHERE {pf} then INSERT (never
-    # append), re-verified twice this session with byte-identical P02/P03
-    # reruns. A retry redoes exactly what a first attempt would have.
+    # Idempotent: load_stg/load_fact via verify_rollback_safety, the
+    # reconcile_* tasks and write_period_signoff via DELETE-then-INSERT,
+    # never append. A retry redoes exactly what a first attempt would.
     default_args={"retries": 1, "on_failure_callback": FAILURE_NOTIFIER},
     params={
-        # No defaults, on purpose - combined with schedule=None, Airflow
-        # validates these at trigger time instead of at DAG-parse time,
-        # so there is no default period a bare trigger could run
-        # silently (mission 20's own requirement).
+        # No defaults - with schedule=None, Airflow validates these at
+        # trigger time, so no bare trigger can run a default period silently.
         "company_code": Param(type="integer", title="Company code"),
         "fiscal_year": Param(type="integer", title="Fiscal year"),
         "fiscal_period": Param(type="integer", title="Fiscal period"),
-        # Demo-only (issue #25). Both default to "" (off) - a normal
-        # trigger never sets these, so a normal run is unaffected.
+        # Demo-only (issue #25); default DEMO_OFF leaves a normal run unaffected.
         "demo_warehouse_path": Param(default=DEMO_OFF, type="string", title="Demo only: override warehouse.duckdb path (leave as \"none\" for a normal run)"),
         "demo_inject_fault_task": Param(default=DEMO_OFF, type="string", title="Demo only: task_id to fail after it completes its real work (leave as \"none\" for a normal run)"),
     },
@@ -295,20 +224,11 @@ with DAG(
                 n = reconcile_mismatch.build_recon_mismatch(con, None)
             finally:
                 con.close()
-            # Mission 21 demo hook (issue #25): fires only when a
-            # trigger's --conf explicitly names this task AND a flag
-            # file exists, and only after the real rebuild above
-            # already completed and wrote real data - proves recovery
-            # from a fault that happens mid-pipeline, not one that
-            # prevents any work from happening at all. Inert (never
-            # raises) on a normal run.
-            #
-            # Gated on a flag file, not just the param, on purpose:
-            # Airflow's Clear preserves a DagRun's original conf, so a
-            # param-only gate could never be "removed" by the same
-            # clear-and-retry this demo exists to prove - deleting the
-            # flag file is the external fix; the conf stays exactly as
-            # it was triggered with, same as any real recovery.
+            # Demo fault injection (issue #25, docs/runbook.md): fires only
+            # after the real rebuild above wrote real data, and only when
+            # both the trigger param and this flag file are set. Gated on
+            # the flag file, not just the param, because Clear preserves a
+            # DagRun's original conf - the flag file is the removable part.
             if ctx["params"].get("demo_inject_fault_task") == "reconcile_mismatch" and Path(
                 "/tmp/gl_period_close_demo_fault_flag"
             ).exists():

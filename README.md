@@ -79,6 +79,13 @@ against the single DuckDB file. Tasks have one retry and require a shared
 local filesystem. Each attempt records input hashes and results; retries
 of source-reading tasks reject changed inputs.
 
+![Raw column to target table](docs/images/raw-to-ready-data-diagram.png)
+
+<table><tr>
+<td><img src="docs/images/schema_1.png" alt="Schema: map_account to stg_gl"></td>
+<td><img src="docs/images/schema_2.png" alt="Schema: fact_gl_line and downstream"></td>
+</tr></table>
+
 See [architecture](docs/architecture.md) and
 [design patterns](docs/design-patterns.md) for the design choices and their
 references to Bartosz Konieczny's *Data Engineering Design Patterns*.
@@ -91,7 +98,6 @@ close state ([ADR-0008](docs/adr/0008-markdown-report-is-working-paper-not-signo
 These are evidence for reviewing an extract, not an accounting-system sign-off.
 
 <!-- ![Period report](docs/images/period-report-sample.png) -->
-
 
 Reconciliation is accepted for P01-P03, but `local_amount` totals remain
 unsigned because of issue [#13](../../issues/13). Matching source and target
@@ -161,14 +167,16 @@ airflow standalone
 
 The local UI is at `localhost:8080`; first launch prints an admin login.
 
-<!-- ![Airflow DAG graph](docs/images/airflow-dag-graph.png) -->
-
 Trigger a period from the UI or CLI:
+
+![Trigger a run](docs/images/airflow_trigger.png)
 
 ```bash
 airflow dags trigger gl_period_close \
   --conf '{"company_code":1000,"fiscal_year":2024,"fiscal_period":3}'
 ```
+
+![DAG graph, full run](docs/images/airflow_dag_graph.png)
 
 The runbook covers setup, failure recovery, and executor requirements.
 
@@ -181,8 +189,12 @@ duckdb -ui warehouse.duckdb
 ```
 
 This opens the warehouse in DuckDB's web UI for browsing tables and running SQL.
+[Query guidance](docs/how-to-query-fact_gl_line.md) has a real wrong-vs-right
+example for this document:
 
-<!-- ![DuckDB UI](docs/images/duckdb-ui.png) -->
+![Wrong: local_amount broadcast total](docs/images/duckdb_broken_total.png)
+
+![Right: debit minus credit](docs/images/duckdb_balanced_amount.png)
 
 ## Status
 
@@ -194,6 +206,10 @@ company `1000`, FY2024 P01-P03.
 the final close gate, per-attempt evidence, and failure alerts. A controlled
 failure and recovery run against a warehouse copy reproduced the baseline
 tables and reports.
+
+![A deliberately injected failure, mid-retry](docs/images/failure_dag_graph.png)
+
+![The resulting SMTP alert](docs/images/alert_email.png)
 
 Open issues:
 
